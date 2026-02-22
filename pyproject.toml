@@ -1,0 +1,16 @@
+[project]
+name = "onca"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "agno>=2.5.2",
+    "openai>=2.21.0",
+    "python-dotenv>=1.2.1",
+    "tiktoken>=0.11.0",
+    "typer>=0.24.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
