@@ -6,6 +6,7 @@ from functools import lru_cache
 from typing import Any
 
 from . import storage
+from .utils import now
 
 try:
     import tiktoken
@@ -26,10 +27,6 @@ class CompactionResult:
     kept_recent_messages: int
     kept_recent_tokens: int
     memory_name: str | None = None
-
-
-def _now() -> int:
-    return int(time.time())
 
 
 @lru_cache(maxsize=8)
@@ -57,15 +54,13 @@ def message_tokens(role: str, content: str, model: str = DEFAULT_TOKEN_MODEL) ->
     return 4 + count_tokens(role, model=model) + count_tokens(content, model=model)
 
 
-def _get_all_messages() -> list[storage.MessageRecord]:
-    return storage.list_messages_with_order()
-
-
 def select_recent_messages_for_context(
+    *,
+    agent_id: str,
     token_budget: int = 20_000,
     model: str = DEFAULT_TOKEN_MODEL,
 ) -> list[storage.MessageRecord]:
-    rows = _get_all_messages()
+    rows = storage.list_messages_with_order(agent_id=agent_id)
     if not rows:
         return []
 
@@ -97,6 +92,8 @@ def _find_recent_tail_start(token_counts: list[int], keep_recent_tokens: int) ->
 
 
 def _build_compaction_memory_payload(
+    *,
+    agent_id: str,
     compacted_rows: list[storage.MessageRecord],
     compacted_tokens: int,
     total_before: int,
@@ -106,7 +103,7 @@ def _build_compaction_memory_payload(
 ) -> tuple[str, str]:
     first = compacted_rows[0]
     last = compacted_rows[-1]
-    created_at = _now()
+    created_at = now()
     memory_name = f'conversation_compaction_{created_at}_{first.id[:8]}'
     summary = (
         f'Auto-compacted {len(compacted_rows)} old messages '
@@ -115,6 +112,7 @@ def _build_compaction_memory_payload(
 
     payload: dict[str, Any] = {
         'type': 'conversation_compaction',
+        'agent_id': agent_id,
         'created_at': created_at,
         'token_model': model,
         'stats': {
@@ -144,6 +142,8 @@ def _build_compaction_memory_payload(
 
 
 def compact_conversation_if_needed(
+    *,
+    agent_id: str,
     threshold_tokens: int = 100_000,
     target_tokens_after: int = 80_000,
     keep_recent_tokens: int = 20_000,
@@ -155,7 +155,7 @@ def compact_conversation_if_needed(
     if target_tokens_after > threshold_tokens:
         raise ValueError('target_tokens_after must be <= threshold_tokens.')
 
-    rows = _get_all_messages()
+    rows = storage.list_messages_with_order(agent_id=agent_id)
     if not rows:
         return CompactionResult(False, 0, 0, 0, 0, 0, 0, None)
 
@@ -201,6 +201,7 @@ def compact_conversation_if_needed(
         )
 
     memory_name, memory_content = _build_compaction_memory_payload(
+        agent_id=agent_id,
         compacted_rows=compacted_rows,
         compacted_tokens=compacted_tokens,
         total_before=total_before,
@@ -209,15 +210,16 @@ def compact_conversation_if_needed(
         model=model,
     )
     storage.upsert_memory(
+        agent_id=agent_id,
         name=memory_name.strip(),
         summary=(
-            f'Conversation history compacted at {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(_now()))}.'
+            f'Conversation history compacted at {time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now()))}.'
         ).strip(),
         content=memory_content.strip(),
         strength=memory_strength,
-        updated_at=_now(),
+        updated_at=now(),
     )
-    storage.delete_messages([row.id for row in compacted_rows])
+    storage.delete_messages(agent_id=agent_id, message_ids=[row.id for row in compacted_rows])
 
     return CompactionResult(
         True,
