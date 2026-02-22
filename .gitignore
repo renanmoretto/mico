@@ -215,7 +215,7 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-.db/
+.mico/
 .DS_Store
 tmp/
 *.db
@@ -224,3 +224,6 @@ tmp/
 *.ipynb
 _idea.txt
 specs/
+.codex/
+.agents/
+.claude/
