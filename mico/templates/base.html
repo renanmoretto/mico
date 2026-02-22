@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{% block title %}mico{% endblock %}</title>
+    <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+      /* ── MONOCHROME PALETTE ── */
+      :root {
+        --accent:       #1a1a1a;
+        --accent-dim:   #555555;
+        --accent-ghost: rgba(0,0,0,0.05);
+        --idle:         #888888;
+        --bg:           #f2f2f2;
+        --surface:      #ffffff;
+        --border:       #cccccc;
+        --border-dim:   #e8e8e8;
+        --sysbar:       #ebebeb;
+        --ink:          #111111;
+        --ink-2:        #333333;
+        --ink-3:        #888888;
+      }
+
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+      body {
+        background: var(--bg);
+        color: var(--ink-2);
+        font-family: 'Geist Mono', monospace;
+        min-height: 100vh;
+      }
+
+      body::before {
+        content: '';
+        position: fixed; inset: 0;
+        background-image: radial-gradient(circle, rgba(0,0,0,0.07) 1px, transparent 0);
+        background-size: 28px 28px;
+        pointer-events: none;
+        z-index: 0;
+      }
+
+      /* ── HEADER ── */
+      .header {
+        border-bottom: 1px solid var(--border);
+        background: var(--surface);
+        position: sticky; top: 0; z-index: 50;
+        box-shadow: 0 1px 0 var(--border-dim);
+      }
+
+      .header-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 14px 32px;
+      }
+
+      .logo {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        text-decoration: none;
+        color: inherit;
+      }
+
+      .logo-mark {
+        width: 32px; height: 32px;
+        border: 2px solid var(--accent);
+        display: flex; align-items: center; justify-content: center;
+        font-size: 11px; font-weight: 600; color: var(--accent);
+        letter-spacing: 1px; user-select: none; flex-shrink: 0;
+      }
+
+      .logo-info { border-left: 1px solid var(--border); padding-left: 18px; }
+
+      .logo-info h1 {
+        color: var(--ink);
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 6px;
+      }
+
+      .logo-info p {
+        font-size: 11px;
+        color: var(--ink-3);
+        margin-top: 2px;
+      }
+
+      nav { display: flex; }
+
+      nav a {
+        color: var(--ink-3);
+        text-decoration: none;
+        font-size: 12px;
+        padding: 6px 14px;
+        border: 1px solid transparent;
+        transition: all 0.15s;
+      }
+
+      nav a:hover, nav a.active {
+        color: var(--accent);
+        border-color: var(--border);
+        background: var(--accent-ghost);
+      }
+
+
+      /* ── MAIN ── */
+      main {
+        max-width: 1160px;
+        margin: 0 auto;
+        padding: 36px 32px 80px;
+        position: relative;
+        z-index: 1;
+      }
+
+      /* Stats strip */
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 1px;
+        background: var(--border);
+        border: 1px solid var(--border);
+        margin-bottom: 36px;
+      }
+
+      .stat { background: var(--surface); padding: 18px 22px; }
+
+      .stat-n {
+        font-size: 40px;
+        font-weight: 300;
+        color: var(--accent);
+        line-height: 1;
+      }
+
+      .stat-l {
+        font-size: 11px;
+        color: var(--ink-3);
+        margin-top: 6px;
+      }
+
+      /* Section header */
+      .sec-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 18px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid var(--border-dim);
+      }
+
+      .sec-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--ink);
+      }
+
+      /* Buttons */
+      .btn {
+        background: transparent;
+        border: 1px solid var(--accent);
+        color: var(--accent);
+        font-family: inherit;
+        font-size: 12px;
+        font-weight: 500;
+        padding: 7px 16px;
+        cursor: pointer;
+        transition: all 0.15s;
+        text-decoration: none;
+        display: inline-block;
+      }
+      .btn:hover { background: var(--accent-ghost); }
+
+      .btn-sm { padding: 4px 10px; font-size: 12px; }
+
+      .btn-dim {
+        border-color: var(--border);
+        color: var(--ink-3);
+      }
+      .btn-dim:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-ghost); }
+
+      .btn-do {
+        background: var(--accent);
+        border: 1px solid var(--accent);
+        color: #fff;
+        font-family: inherit;
+        font-size: 13px;
+        font-weight: 500;
+        padding: 11px;
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+      .btn-do:hover { background: var(--ink); border-color: var(--ink); }
+
+      .btn-no {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--ink-3);
+        font-family: inherit;
+        font-size: 13px;
+        padding: 11px 20px;
+        cursor: pointer;
+        transition: border-color 0.15s;
+      }
+      .btn-no:hover { border-color: var(--ink-3); }
+
+      .btn-danger {
+        background: transparent;
+        border: 1px solid #c0392b;
+        color: #c0392b;
+        font-family: inherit;
+        font-size: 12px;
+        font-weight: 500;
+        padding: 7px 16px;
+        cursor: pointer;
+        transition: all 0.15s;
+      }
+      .btn-danger:hover { background: rgba(192, 57, 43, 0.05); }
+
+      /* Table */
+      .table-frame {
+        border: 1px solid var(--border);
+        background: var(--surface);
+      }
+
+      table { width: 100%; border-collapse: collapse; }
+
+      thead tr {
+        background: var(--sysbar);
+        border-bottom: 1px solid var(--border);
+      }
+
+      th {
+        text-align: left;
+        font-size: 11px;
+        font-weight: 500;
+        color: var(--ink-3);
+        padding: 10px 18px;
+      }
+
+      tbody tr {
+        border-bottom: 1px solid var(--border-dim);
+        transition: background 0.1s;
+      }
+
+      tbody tr:hover { background: var(--accent-ghost); }
+      tbody tr:last-child { border-bottom: none; }
+
+      td {
+        padding: 14px 18px;
+        font-size: 13px;
+        vertical-align: middle;
+      }
+
+      /* Forms */
+      .f { margin-bottom: 18px; }
+
+      .f label {
+        display: block;
+        font-size: 11px;
+        font-weight: 500;
+        color: var(--ink-3);
+        margin-bottom: 6px;
+      }
+
+      input[type="text"],
+      input[type="password"],
+      input[type="email"],
+      textarea {
+        width: 100%;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        color: var(--ink);
+        font-family: inherit;
+        font-size: 13px;
+        padding: 10px 12px;
+        outline: none;
+        transition: border-color 0.15s;
+      }
+
+      input[type="text"]:focus,
+      input[type="password"]:focus,
+      input[type="email"]:focus,
+      textarea:focus {
+        border-color: var(--accent);
+        background: var(--surface);
+        box-shadow: 0 0 0 3px rgba(0,0,0,0.06);
+      }
+
+      textarea { min-height: 100px; resize: vertical; }
+      input::placeholder, textarea::placeholder { color: var(--border); }
+
+      /* Status indicators */
+      .s-on::before  { content: '● '; }
+      .s-on  { color: var(--accent); font-size: 11px; font-weight: 500; }
+      .s-idle::before { content: '◐ '; }
+      .s-idle { color: var(--idle); font-size: 11px; }
+      .s-off::before  { content: '○ '; }
+      .s-off  { color: var(--border); font-size: 11px; }
+
+      /* Tags */
+      .tag {
+        display: inline-block;
+        border: 1px solid var(--border);
+        padding: 2px 8px;
+        font-size: 11px;
+        color: var(--ink-3);
+        background: var(--bg);
+        margin-right: 4px;
+        margin-bottom: 2px;
+      }
+
+      /* Notices */
+      .notice {
+        padding: 10px 14px;
+        border: 1px solid;
+        margin-bottom: 24px;
+        font-size: 11px;
+      }
+      .notice-ok {
+        border-color: var(--accent);
+        background: var(--accent-ghost);
+        color: var(--accent);
+      }
+      .notice-err {
+        border-color: #c0392b;
+        background: rgba(192, 57, 43, 0.05);
+        color: #c0392b;
+      }
+
+      /* Card */
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        padding: 18px 20px;
+      }
+
+      .card-title {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--ink-3);
+        margin-bottom: 14px;
+        padding-bottom: 10px;
+        border-bottom: 1px solid var(--border-dim);
+      }
+
+      /* Stat row */
+      .stat-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 8px 0;
+        border-bottom: 1px solid var(--border-dim);
+        font-size: 13px;
+      }
+      .stat-row:last-child { border-bottom: none; }
+      .stat-row .label { color: var(--ink-3); }
+      .stat-row .value { color: var(--ink); }
+
+      /* Code block */
+      .code-block {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        padding: 14px;
+        font-family: 'Geist Mono', monospace;
+        font-size: 12px;
+        color: var(--ink);
+        overflow-x: auto;
+        white-space: pre-wrap;
+      }
+
+      /* Modal */
+      .modal-bg {
+        display: none;
+        position: fixed; inset: 0;
+        background: rgba(10, 10, 10, 0.5);
+        backdrop-filter: blur(2px);
+        z-index: 200;
+        align-items: center;
+        justify-content: center;
+      }
+      .modal-bg.open { display: flex; }
+
+      .modal {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        box-shadow: 0 8px 40px rgba(0,0,0,0.10), 0 2px 8px rgba(0,0,0,0.06);
+        width: 480px;
+        overflow: hidden;
+      }
+
+      .modal::before {
+        content: '';
+        display: block;
+        height: 3px;
+        background: linear-gradient(90deg, var(--ink), var(--accent-dim));
+      }
+
+      .modal-inner { padding: 32px 34px 34px; }
+
+      .modal-head {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--ink);
+        margin-bottom: 24px;
+        padding-bottom: 14px;
+        border-bottom: 1px solid var(--border-dim);
+      }
+
+      .modal-acts { display: flex; gap: 10px; margin-top: 24px; }
+
+      /* Footer */
+      footer {
+        border-top: 1px solid var(--border-dim);
+        padding: 14px 32px;
+        text-align: center;
+        font-size: 11px;
+        color: var(--border);
+        position: relative;
+        z-index: 1;
+      }
+
+      @keyframes row-in { from{opacity:0;transform:translateX(-6px)} to{opacity:1;transform:none} }
+
+      {% block head_css %}{% endblock %}
+    </style>
+    {% block head %}{% endblock %}
+  </head>
+  <body>
+    <div class="header">
+      <div class="header-top">
+        <a href="/agents" class="logo">
+          <div class="logo-mark">M</div>
+          <div class="logo-info">
+            <h1>mico</h1>
+            <p>multi-agent control</p>
+          </div>
+        </a>
+        <nav>
+          <a href="/agents" id="nav-agents">[agents]</a>
+          <a href="/config" id="nav-config">[config]</a>
+        </nav>
+      </div>
+    </div>
+
+    <main>
+      {% if ok %}
+        <div class="notice notice-ok">{{ ok }}</div>
+      {% endif %}
+      {% if error %}
+        <div class="notice notice-err">{{ error }}</div>
+      {% endif %}
+      {% block content %}{% endblock %}
+    </main>
+
+    <footer>mico &middot; one agent, one brain, many channels &middot; v1.0.0</footer>
+
+    <script>
+      (function() {
+        var path = window.location.pathname;
+        document.querySelectorAll('nav a').forEach(function(a) {
+          var ap = new URL(a.href, window.location.origin).pathname;
+          if (ap !== '/' && path.startsWith(ap)) a.classList.add('active');
+        });
+      })();
+    </script>
+    {% block scripts %}{% endblock %}
+  </body>
+</html>

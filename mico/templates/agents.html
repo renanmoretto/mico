@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+
+{% block title %}mico :: agents{% endblock %}
+
+{% block head_css %}
+.td-num { color: var(--border); font-size: 10px; width: 44px; }
+.a-name { color: var(--ink); font-weight: 500; font-size: 13px; }
+.a-id { font-size: 9px; color: var(--ink-3); margin-top: 3px; opacity: 0.6; }
+.persona-txt {
+  font-size: 10px; color: var(--ink-3);
+  max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.persona-nil { font-size: 10px; color: var(--border); font-style: italic; }
+
+.open-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--ink-3);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: all 0.1s;
+}
+.open-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-ghost); }
+
+.empty-state {
+  padding: 60px 32px;
+  text-align: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+.empty-state p {
+  font-size: 13px; color: var(--ink-3);
+  margin-bottom: 24px;
+}
+
+tbody tr { animation: row-in 0.35s ease both; cursor: pointer; }
+tbody tr:nth-child(2) { animation-delay: 0.07s; }
+tbody tr:nth-child(3) { animation-delay: 0.14s; }
+tbody tr:nth-child(4) { animation-delay: 0.21s; }
+tbody tr:nth-child(5) { animation-delay: 0.28s; }
+{% endblock %}
+
+{% block head %}
+<script>
+  function openModal() {
+    document.getElementById('m').classList.add('open');
+    setTimeout(function() {
+      var inp = document.querySelector('#m input[name="name"]');
+      if (inp) inp.focus();
+    }, 50);
+  }
+  function closeModal() {
+    document.getElementById('m').classList.remove('open');
+  }
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeModal();
+  });
+</script>
+{% endblock %}
+
+{% block content %}
+{% set active_count = rows | selectattr('status', 'equalto', 'active') | list | length %}
+{% set ns = namespace(total_ch=0) %}
+{% for chs in channels_by_agent.values() %}{% set ns.total_ch = ns.total_ch + (chs | length) %}{% endfor %}
+
+<div class="stats">
+  <div class="stat">
+    <div class="stat-n">{{ '%02d' % (rows | length) }}</div>
+    <div class="stat-l">Agents</div>
+  </div>
+  <div class="stat">
+    <div class="stat-n">{{ '%02d' % active_count }}</div>
+    <div class="stat-l">Active</div>
+  </div>
+  <div class="stat">
+    <div class="stat-n">{{ '%02d' % ns.total_ch }}</div>
+    <div class="stat-l">Channels</div>
+  </div>
+  <div class="stat">
+    <div class="stat-n">00</div>
+    <div class="stat-l">Errors</div>
+  </div>
+</div>
+
+<div class="sec-head">
+  <div class="sec-title">agents</div>
+  <button class="btn" onclick="openModal()">+ new agent</button>
+</div>
+
+{% if rows %}
+<div class="table-frame">
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>identifier</th>
+        <th>status</th>
+        <th>channels</th>
+        <th>persona</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr onclick="window.location='/agents/{{ row.id }}'">
+        <td class="td-num">{{ '%02d' % loop.index }}</td>
+        <td>
+          <div class="a-name">{{ row.name }}</div>
+          <div class="a-id">uuid:{{ row.id }}</div>
+        </td>
+        <td>
+          {% if row.status == 'active' %}
+            <span class="s-on">active</span>
+          {% elif row.status == 'idle' %}
+            <span class="s-idle">idle</span>
+          {% else %}
+            <span class="s-off">offline</span>
+          {% endif %}
+        </td>
+        <td>
+          {% for ch in channels_by_agent[row.id][:2] %}
+            <span class="tag">{{ ch.channel }}</span>
+          {% endfor %}
+          {% if channels_by_agent[row.id] | length > 2 %}
+            <span class="tag">+{{ channels_by_agent[row.id] | length - 2 }}</span>
+          {% endif %}
+          {% if not channels_by_agent[row.id] %}
+            <span style="color:var(--border);font-size:10px">—</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if row.persona %}
+            <div class="persona-txt">{{ row.persona }}</div>
+          {% else %}
+            <div class="persona-nil">// no persona defined</div>
+          {% endif %}
+        </td>
+        <td>
+          <button class="open-btn" onclick="event.stopPropagation(); window.location='/agents/{{ row.id }}'">open ›</button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty-state">
+  <p>no agents yet</p>
+  <button class="btn" onclick="openModal()">+ new agent</button>
+</div>
+{% endif %}
+
+<div class="modal-bg" id="m" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <div class="modal-inner">
+      <div class="modal-head">new agent</div>
+      <form method="post" action="/agents">
+        <div class="f">
+          <label>Name</label>
+          <input type="text" name="name" placeholder="research-assistant" autofocus required autocomplete="off" />
+        </div>
+        <div class="f">
+          <label>Persona <span style="color:var(--border)">(optional)</span></label>
+          <textarea name="persona" placeholder="Define agent behavior and capabilities..."></textarea>
+        </div>
+        <div class="modal-acts">
+          <button type="button" class="btn-no" onclick="closeModal()">cancel</button>
+          <button type="submit" class="btn-do" style="flex:1">create</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}

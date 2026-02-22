@@ -1,0 +1,763 @@
+{% extends "base.html" %}
+
+{% block title %}mico :: {{ agent.name }}{% endblock %}
+
+{% block head_css %}
+html, body { height: 100%; min-height: 0; overflow: hidden; }
+body { display: flex; flex-direction: column; }
+body > main {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  max-width: none;
+  width: 100%;
+}
+
+.agent-page {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 16px 32px;
+}
+
+.agent-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  flex-shrink: 0;
+}
+
+.agent-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.agent-title h1 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* ── TABS ── */
+.tabs-bar {
+  display: flex;
+  align-items: flex-end;
+  border-bottom: 1px dashed var(--border);
+  margin-bottom: 16px;
+  flex-shrink: 0;
+}
+
+.tab-btn {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-3);
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: all 0.15s;
+  margin-bottom: -1px;
+}
+.tab-btn:hover { color: var(--ink); }
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+.tab-content { display: none; flex: 1; overflow: hidden; }
+.tab-content.active { display: flex; flex-direction: column; }
+
+/* ── CARDS ── */
+.card-grid { display: grid; gap: 14px; }
+.card-grid-2 { grid-template-columns: 2fr 1fr; }
+.card-grid-equal { grid-template-columns: 1fr 1fr; }
+
+.ch-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border-dim);
+  margin-bottom: 6px;
+}
+.ch-item:last-child { margin-bottom: 0; }
+.ch-name { font-size: 13px; color: var(--ink); }
+.ch-status-on { font-size: 11px; color: var(--accent); }
+.ch-status-off { font-size: 11px; color: var(--border); }
+
+/* ── CHAT ── */
+.chat-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  scroll-behavior: smooth;
+}
+
+.chat-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--border);
+  font-size: 13px;
+  gap: 6px;
+}
+
+.chat-bubble {
+  max-width: 85%;
+  width: fit-content;
+  padding: 10px 14px;
+  border: 1px solid var(--border-dim);
+  margin-bottom: 10px;
+  animation: bubbleIn 0.2s ease-out;
+}
+@keyframes bubbleIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
+
+.chat-bubble.user {
+  background: var(--sysbar);
+  border-left: 3px solid var(--accent);
+  margin-left: auto;
+}
+.chat-bubble.assistant {
+  background: var(--surface);
+  border-left: 3px solid var(--border);
+}
+.chat-bubble.system {
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  margin: 0 auto;
+  text-align: center;
+  font-size: 10px;
+  max-width: 60%;
+}
+
+.chat-bubble .role-label {
+  font-size: 10px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: var(--ink-3);
+}
+.chat-bubble.user .role-label { color: var(--accent); }
+
+.chat-bubble .content {
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-bubble .timestamp {
+  font-size: 9px;
+  color: var(--border);
+  margin-top: 4px;
+  text-align: right;
+}
+
+.typing-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border-dim);
+  border-left: 3px solid var(--border);
+  max-width: 60px;
+  margin-bottom: 10px;
+}
+.typing-indicator .dot {
+  width: 5px; height: 5px;
+  background: var(--border);
+  border-radius: 50%;
+  animation: typingPulse 1.2s ease-in-out infinite;
+}
+.typing-indicator .dot:nth-child(2) { animation-delay: 0.15s; }
+.typing-indicator .dot:nth-child(3) { animation-delay: 0.3s; }
+@keyframes typingPulse {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-3px); opacity: 1; }
+}
+
+.chat-input-area {
+  padding: 12px 16px;
+  background: var(--sysbar);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.chat-input-row { display: flex; gap: 8px; align-items: center; }
+
+.chat-input-row input {
+  flex: 1;
+  width: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--ink);
+  font-family: 'Geist Mono', monospace;
+  font-size: 12px;
+  padding: 10px 12px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.chat-input-row input:focus { border-color: var(--accent); }
+.chat-input-row input:disabled { opacity: 0.5; cursor: not-allowed; }
+.chat-input-row input::placeholder { color: var(--border); }
+
+.chat-send-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px; height: 40px;
+  background: var(--accent);
+  border: none;
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+.chat-send-btn:hover:not(:disabled) { background: var(--ink); }
+.chat-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.spinner {
+  width: 14px; height: 14px;
+  border: 2px solid transparent;
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.hidden { display: none !important; }
+
+.chat-status {
+  font-size: 11px;
+  color: var(--ink-3);
+  margin-top: 6px;
+  text-align: center;
+  min-height: 12px;
+}
+.chat-status.error { color: #c0392b; }
+
+/* ── WORKSPACE ── */
+.workspace-layout {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 14px;
+  flex: 1;
+  overflow: hidden;
+  padding-bottom: 16px;
+}
+
+.workspace-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.workspace-breadcrumb {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0;
+  font-size: 10px;
+  color: var(--ink-3);
+  margin-bottom: 10px;
+  padding: 5px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border-dim);
+  font-family: 'Geist Mono', monospace;
+}
+.workspace-breadcrumb a {
+  color: var(--accent);
+  text-decoration: none;
+  padding: 1px 3px;
+}
+.workspace-breadcrumb a:hover { background: var(--accent-ghost); }
+.workspace-breadcrumb .sep { color: var(--border); padding: 0 1px; }
+
+.file-browser {
+  background: var(--bg);
+  border: 1px solid var(--border-dim);
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-dim);
+  font-size: 11px;
+  color: var(--ink-3);
+  text-decoration: none;
+  transition: background 0.1s;
+}
+.file-item:last-child { border-bottom: none; }
+.file-item:hover { background: var(--accent-ghost); color: var(--ink); }
+.file-item.is-dir { color: var(--accent); }
+.file-item.is-parent { color: var(--ink-3); font-style: italic; }
+.file-item.is-selected { background: var(--accent-ghost); color: var(--ink); border-left: 2px solid var(--accent); }
+.file-sym { color: var(--border); font-size: 9px; font-weight: 600; }
+
+.code-preview {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+  font-size: 11px;
+}
+{% endblock %}
+
+{% block head %}
+<script>
+function switchTab(tabId) {
+  document.querySelectorAll('.tab-btn').forEach(function(b) { b.classList.remove('active'); });
+  document.querySelectorAll('.tab-content').forEach(function(c) { c.classList.remove('active'); });
+  document.querySelector('[data-tab="' + tabId + '"]').classList.add('active');
+  document.getElementById(tabId).classList.add('active');
+  history.replaceState(null, '', '?tab=' + tabId);
+}
+document.addEventListener('DOMContentLoaded', function() {
+  var params = new URLSearchParams(window.location.search);
+  var tab = params.get('tab') || 'overview';
+  if (document.getElementById(tab)) switchTab(tab);
+});
+</script>
+{% endblock %}
+
+{% block content %}
+<div class="agent-page">
+
+  <!-- Topbar -->
+  <div class="agent-topbar">
+    <div class="agent-title">
+      <a href="/agents" class="btn btn-sm btn-dim">← back</a>
+      {% if agent.status == 'active' %}
+        <h1>{{ agent.name }}</h1>
+      {% elif agent.status == 'idle' %}
+        <h1 style="color:var(--idle)">{{ agent.name }}</h1>
+      {% else %}
+        <h1 style="color:var(--border)">{{ agent.name }}</h1>
+      {% endif %}
+    </div>
+    <div style="font-size:9px;color:var(--ink-3);letter-spacing:2px">uuid:{{ agent.id[:8] }}...</div>
+  </div>
+
+  <!-- Tab nav -->
+  <div class="tabs-bar">
+    <button class="tab-btn active" data-tab="overview" onclick="switchTab('overview')">overview</button>
+    <button class="tab-btn" data-tab="chat" onclick="switchTab('chat')">chat</button>
+    <button class="tab-btn" data-tab="workspace" onclick="switchTab('workspace')">workspace</button>
+    <button class="tab-btn" data-tab="channels" onclick="switchTab('channels')">channels</button>
+    <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">settings</button>
+  </div>
+
+  <!-- ── OVERVIEW ── -->
+  <div id="overview" class="tab-content active">
+    <div class="card-grid card-grid-2" style="flex:1;overflow:auto;padding-bottom:16px;align-content:start">
+      <div class="card">
+        <div class="card-title">channels</div>
+        <div class="ch-item">
+          <span class="ch-name">web</span>
+          <span class="ch-status-on">● active</span>
+        </div>
+        {% for ch in channels[:5] %}
+        <div class="ch-item">
+          <span class="ch-name">{{ ch.channel }}</span>
+          {% if ch.enabled %}
+            <span class="ch-status-on">● active</span>
+          {% else %}
+            <span class="ch-status-off">○ disabled</span>
+          {% endif %}
+        </div>
+        {% endfor %}
+        {% if channels | length > 5 %}
+        <a href="?tab=channels" onclick="switchTab('channels'); return false;"
+           style="font-size:9px;color:var(--ink-3);text-decoration:none;display:block;margin-top:10px;letter-spacing:2px">
+          +{{ channels|length - 5 }} more ›
+        </a>
+        {% endif %}
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div class="card">
+          <div class="card-title">stats</div>
+          <div class="stat-row">
+            <span class="label">Status</span>
+            <span class="value">
+              {% if agent.status == 'active' %}<span class="s-on">active</span>
+              {% elif agent.status == 'idle' %}<span class="s-idle">idle</span>
+              {% else %}<span class="s-off">offline</span>{% endif %}
+            </span>
+          </div>
+          <div class="stat-row">
+            <span class="label">Channels</span>
+            <span class="value">{{ channels | length + 1 }}</span>
+          </div>
+          <div class="stat-row">
+            <span class="label">Created</span>
+            <span class="value">{{ agent.created_at }}</span>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">actions</div>
+          <a href="?tab=chat" onclick="switchTab('chat'); return false;"
+             class="btn" style="display:block;text-align:center;margin-bottom:8px">open chat</a>
+          <a href="?tab=settings" onclick="switchTab('settings'); return false;"
+             class="btn btn-dim" style="display:block;text-align:center">settings</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── CHAT ── -->
+  <div id="chat" class="tab-content">
+    <div class="chat-container">
+      <div class="chat-messages" id="chat-messages">
+        <div id="chat-empty" class="chat-empty" style="{% if recent_messages %}display:none{% endif %}">
+          <span>no messages yet</span>
+          <span style="font-size:8px">type a message below</span>
+        </div>
+        {% if recent_messages %}
+          {% for msg in recent_messages %}
+          <div class="chat-bubble {{ msg.role }}" data-ts="{{ msg.timestamp }}">
+            <div class="role-label">{{ msg.role }}</div>
+            <div class="content">{{ msg.content }}</div>
+            <div class="timestamp">{{ msg.timestamp }}</div>
+          </div>
+          {% endfor %}
+        {% endif %}
+      </div>
+      <div class="chat-input-area">
+        <div class="chat-input-row">
+          <input type="text" id="chat-input" placeholder="message..." autocomplete="off" />
+          <button type="button" class="chat-send-btn" id="chat-send-btn" title="Send">
+            <svg id="chat-send-icon" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
+            </svg>
+            <div class="spinner hidden" id="chat-spinner"></div>
+          </button>
+        </div>
+        <div class="chat-status" id="chat-status"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── WORKSPACE ── -->
+  <div id="workspace" class="tab-content">
+    <div class="workspace-layout">
+
+      <!-- File Browser -->
+      <div class="card workspace-panel">
+        <div class="card-title">files</div>
+
+        <!-- Breadcrumb navigation -->
+        <div class="workspace-breadcrumb">
+          <a href="/agents/{{ agent.id }}?tab=workspace&path=.">~</a>
+          {% if workspace_path != '.' %}
+            {% set ns = namespace(crumb='') %}
+            {% for part in workspace_path.split('/') %}
+              {% if ns.crumb %}
+                {% set ns.crumb = ns.crumb + '/' + part %}
+              {% else %}
+                {% set ns.crumb = part %}
+              {% endif %}
+              <span class="sep">/</span>
+              <a href="/agents/{{ agent.id }}?tab=workspace&path={{ ns.crumb }}">{{ part }}</a>
+            {% endfor %}
+          {% endif %}
+        </div>
+
+        {% if workspace_error %}
+          <div class="notice notice-err" style="padding:8px 12px;font-size:10px;margin-bottom:10px">{{ workspace_error }}</div>
+        {% endif %}
+
+        <div class="file-browser">
+          {% if workspace_path != '.' %}
+            <a href="/agents/{{ agent.id }}?tab=workspace&path={{ workspace_parent_path }}" class="file-item is-parent">
+              <span class="file-sym">..</span>
+              <span>parent directory</span>
+            </a>
+          {% endif %}
+          {% if workspace_items %}
+            {% for item in workspace_items %}
+            <a href="{{ item.href }}" class="file-item {% if item.is_dir %}is-dir{% endif %} {% if not item.is_dir and selected_file and item.display == selected_file %}is-selected{% endif %}">
+              <span class="file-sym">{% if item.is_dir %}[d]{% else %}[-]{% endif %}</span>
+              <span>{{ item.display }}</span>
+            </a>
+            {% endfor %}
+          {% else %}
+            <div style="padding:20px;text-align:center;font-size:9px;color:var(--border);text-transform:uppercase;letter-spacing:3px">empty</div>
+          {% endif %}
+        </div>
+      </div>
+
+      <!-- File Preview -->
+      <div class="card workspace-panel">
+        {% if selected_file %}
+          <div class="card-title" style="font-size:10px;word-break:break-all;margin-bottom:12px">{{ selected_file }}</div>
+          {% if selected_file_error %}
+            <div class="notice notice-err" style="padding:8px 12px;font-size:10px">{{ selected_file_error }}</div>
+          {% else %}
+            <div class="code-block code-preview">{{ selected_file_content }}</div>
+          {% endif %}
+        {% else %}
+          <div class="card-title">file preview</div>
+          <div style="display:flex;align-items:center;justify-content:center;flex:1;font-size:9px;color:var(--border);text-transform:uppercase;letter-spacing:3px">
+            select a file
+          </div>
+        {% endif %}
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── CHANNELS ── -->
+  <div id="channels" class="tab-content">
+    <div class="card-grid card-grid-equal" style="flex:1;overflow:auto;padding-bottom:16px;align-content:start">
+      <div class="card">
+        <div class="card-title">web</div>
+        <div class="ch-item">
+          <span class="ch-name">web interface</span>
+          <span class="ch-status-on">● active</span>
+        </div>
+        <p style="font-size:9px;color:var(--ink-3);margin-top:10px;letter-spacing:1px">Built-in chat interface. Always enabled.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-title">telegram</div>
+        <form method="post" action="/agents/{{ agent.id }}/telegram">
+          <div class="f">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+              <input type="checkbox" name="enabled" {% if telegram and telegram.enabled %}checked{% endif %} />
+              Enable Telegram Bot
+            </label>
+          </div>
+          <div class="f">
+            <label>Bot Token</label>
+            <input type="text" name="bot_token" value="{{ telegram_bot_token }}"
+                   placeholder="123456:ABCDEF..." style="font-size:11px;padding:8px 10px" />
+          </div>
+          <div class="f">
+            <label>Allowed Chat IDs <span style="color:var(--border)">(one per line)</span></label>
+            <textarea name="allowed_chat_ids" style="min-height:60px;font-size:11px;padding:8px 10px">{{ telegram_allowed_chat_ids }}</textarea>
+          </div>
+          <button type="submit" class="btn" style="width:100%;text-align:center;display:block">save</button>
+        </form>
+      </div>
+
+      {% if channels %}
+      <div class="card" style="grid-column:1/-1">
+        <div class="card-title">all channels</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px">
+          {% for ch in channels %}
+          <div class="ch-item">
+            <span class="ch-name">{{ ch.channel }}</span>
+            {% if ch.enabled %}
+              <span class="ch-status-on">● on</span>
+            {% else %}
+              <span class="ch-status-off">○ off</span>
+            {% endif %}
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- ── SETTINGS ── -->
+  <div id="settings" class="tab-content">
+    <div class="card-grid card-grid-2" style="flex:1;overflow:auto;padding-bottom:16px;align-content:start">
+      <div style="display:flex;flex-direction:column;gap:16px">
+        <div class="card">
+          <div class="card-title">persona</div>
+          <form method="post" action="/agents/{{ agent.id }}/persona">
+            <div class="f">
+              <textarea name="persona" style="min-height:140px;font-size:11px">{{ agent.persona }}</textarea>
+            </div>
+            <button type="submit" class="btn">save persona</button>
+          </form>
+        </div>
+
+        <div class="card" style="border-color:#e0c0c0">
+          <div class="card-title" style="color:#c0392b">danger zone</div>
+          <p style="font-size:10px;color:var(--ink-3);margin-bottom:14px;letter-spacing:1px">
+            Permanently delete this agent and all its data.
+          </p>
+          <form method="post" action="/agents/{{ agent.id }}/delete"
+                onsubmit="return confirm('delete agent: {{ agent.name }}?\n\nthis cannot be undone.')">
+            <button type="submit" class="btn-danger">delete agent</button>
+          </form>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">agent info</div>
+        <div class="stat-row">
+          <span class="label">ID</span>
+          <span class="value" style="font-size:9px;word-break:break-all">{{ agent.id }}</span>
+        </div>
+        <div class="stat-row">
+          <span class="label">Status</span>
+          <span class="value">
+            {% if agent.status == 'active' %}<span class="s-on">active</span>
+            {% elif agent.status == 'idle' %}<span class="s-idle">idle</span>
+            {% else %}<span class="s-off">offline</span>{% endif %}
+          </span>
+        </div>
+        <div class="stat-row">
+          <span class="label">Created</span>
+          <span class="value">{{ agent.created_at }}</span>
+        </div>
+        <div class="stat-row">
+          <span class="label">Updated</span>
+          <span class="value">{{ agent.updated_at }}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+  var agentId = '{{ agent.id }}';
+  var messagesEl = document.getElementById('chat-messages');
+  var emptyEl = document.getElementById('chat-empty');
+  var inputEl = document.getElementById('chat-input');
+  var sendBtn = document.getElementById('chat-send-btn');
+  var sendIcon = document.getElementById('chat-send-icon');
+  var spinnerEl = document.getElementById('chat-spinner');
+  var statusEl = document.getElementById('chat-status');
+  var isLoading = false;
+  var lastTimestamp = 0;
+
+  function scrollToEnd() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+
+  function formatTime(ts) {
+    if (typeof ts === 'number') {
+      var d = new Date(ts * 1000);
+      return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    }
+    return ts;
+  }
+
+  function escapeHtml(str) {
+    var div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  function addMessage(msg) {
+    emptyEl.style.display = 'none';
+    var div = document.createElement('div');
+    div.className = 'chat-bubble ' + msg.role;
+    div.setAttribute('data-ts', msg.timestamp);
+    div.innerHTML =
+      '<div class="role-label">' + msg.role + '</div>' +
+      '<div class="content">' + escapeHtml(msg.content) + '</div>' +
+      '<div class="timestamp">' + formatTime(msg.timestamp) + '</div>';
+    messagesEl.appendChild(div);
+    if (msg.timestamp > lastTimestamp) lastTimestamp = msg.timestamp;
+    scrollToEnd();
+    return div;
+  }
+
+  function showTyping() {
+    if (document.getElementById('typing-indicator')) return;
+    emptyEl.style.display = 'none';
+    var div = document.createElement('div');
+    div.className = 'typing-indicator';
+    div.id = 'typing-indicator';
+    div.innerHTML = '<div class="dot"></div><div class="dot"></div><div class="dot"></div>';
+    messagesEl.appendChild(div);
+    scrollToEnd();
+  }
+
+  function hideTyping() {
+    var el = document.getElementById('typing-indicator');
+    if (el) el.remove();
+  }
+
+  function setLoading(loading) {
+    isLoading = loading;
+    inputEl.disabled = loading;
+    sendBtn.disabled = loading;
+    sendIcon.classList.toggle('hidden', loading);
+    spinnerEl.classList.toggle('hidden', !loading);
+  }
+
+  function setStatus(text, isError) {
+    statusEl.textContent = text || '';
+    statusEl.classList.toggle('error', !!isError);
+  }
+
+  async function sendMessage() {
+    var content = inputEl.value.trim();
+    if (!content || isLoading) return;
+    inputEl.value = '';
+    setLoading(true);
+    setStatus('');
+    addMessage({role:'user', content:content, timestamp:Math.floor(Date.now()/1000)});
+    showTyping();
+    try {
+      var resp = await fetch('/api/agents/' + encodeURIComponent(agentId) + '/chat', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({message: content})
+      });
+      if (!resp.ok) {
+        var errData = await resp.json().catch(function(){return {};});
+        throw new Error(errData.error || 'Request failed');
+      }
+      var data = await resp.json();
+      hideTyping();
+      if (data.messages) {
+        messagesEl.querySelectorAll('.chat-bubble').forEach(function(el){ el.remove(); });
+        lastTimestamp = 0;
+        data.messages.forEach(function(m){ addMessage(m); });
+      }
+      setLoading(false);
+    } catch(err) {
+      hideTyping();
+      setLoading(false);
+      setStatus(err.message || 'failed to send message', true);
+    }
+  }
+
+  sendBtn.addEventListener('click', sendMessage);
+  inputEl.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  });
+
+  (function initTimestamps() {
+    document.querySelectorAll('.chat-bubble').forEach(function(el) {
+      var ts = parseInt(el.getAttribute('data-ts'), 10);
+      if (ts > lastTimestamp) lastTimestamp = ts;
+      var timeEl = el.querySelector('.timestamp');
+      if (timeEl) timeEl.textContent = formatTime(ts);
+    });
+  })();
+  scrollToEnd();
+})();
+</script>
+{% endblock %}
