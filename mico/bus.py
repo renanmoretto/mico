@@ -141,7 +141,6 @@ class AgentMessageWorker:
                 channel=message.channel,
                 chat_id=message.chat_id,
                 content=response,
-                reply_to_message_id=message.message_id,
             )
             await self._bus.publish_outbound(outbound)
 
