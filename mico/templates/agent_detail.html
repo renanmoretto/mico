@@ -18,7 +18,8 @@ body > main {
 .agent-page {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  flex: 1;
+  min-height: 0;
   padding: 16px 32px;
 }
 
@@ -68,7 +69,7 @@ body > main {
 .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
 
 .tab-content { display: none; flex: 1; overflow: hidden; }
-.tab-content.active { display: flex; flex-direction: column; }
+.tab-content.active { display: flex; flex-direction: column; min-height: 0; }
 
 /* ── CARDS ── */
 .card-grid { display: grid; gap: 14px; }
@@ -580,6 +581,10 @@ function switchTab(tabId) {
   document.querySelector('[data-tab="' + tabId + '"]').classList.add('active');
   document.getElementById(tabId).classList.add('active');
   history.replaceState(null, '', '?tab=' + tabId);
+  if (tabId === 'chat') {
+    var msgs = document.getElementById('chat-messages');
+    if (msgs) requestAnimationFrame(function() { msgs.scrollTop = msgs.scrollHeight; });
+  }
 }
 document.addEventListener('DOMContentLoaded', function() {
   var params = new URLSearchParams(window.location.search);
@@ -918,16 +923,6 @@ function toggleTokenVis() {
   <div id="settings" class="tab-content">
     <div class="card-grid card-grid-2" style="flex:1;overflow:auto;padding-bottom:16px;align-content:start">
       <div style="display:flex;flex-direction:column;gap:16px">
-        <div class="card">
-          <div class="card-title">persona</div>
-          <form method="post" action="/agents/{{ agent.id }}/persona">
-            <div class="f">
-              <textarea name="persona" style="min-height:140px;font-size:11px">{{ agent.persona }}</textarea>
-            </div>
-            <button type="submit" class="btn">save persona</button>
-          </form>
-        </div>
-
         <div class="card" style="border-color:#e0c0c0">
           <div class="card-title" style="color:#c0392b">danger zone</div>
           <p style="font-size:10px;color:var(--ink-3);margin-bottom:14px;letter-spacing:1px">
@@ -1032,7 +1027,6 @@ function toggleTokenVis() {
 
   function setLoading(loading) {
     isLoading = loading;
-    inputEl.disabled = loading;
     sendBtn.disabled = loading;
     sendIcon.classList.toggle('hidden', loading);
     spinnerEl.classList.toggle('hidden', !loading);
