@@ -1,5 +1,6 @@
 import asyncio
 import time
+from datetime import datetime
 from typing import Any, Callable
 
 from agno.agent import Agent
@@ -10,16 +11,18 @@ from . import compact
 from . import storage
 from .config import CONFIG, get_model
 from .logging import logger
+from .messages import OutboundMessage
+from .prompts import SYSTEM_PROMPT
 from .runtime import get_runtime_manager
 from .tools import TOOLS
 
 
-def _tool_hook(function_name: str, function_call: Callable, arguments: dict[str, Any]) -> Any:
+async def _tool_hook(function_name: str, function_call: Callable, arguments: dict[str, Any]) -> Any:
     args_preview = {k: repr(v)[:100] for k, v in arguments.items() if k != 'run_context'}
     logger.info(f'[tool] calling {function_name} | args={args_preview}')
     t0 = time.perf_counter()
     try:
-        result = function_call(**arguments)
+        result = await function_call(**arguments)
         elapsed_ms = (time.perf_counter() - t0) * 1000
         result_preview = repr(result)[:200] if result is not None else 'None'
         logger.info(f'[tool] {function_name} ok | {elapsed_ms:.0f}ms | result={result_preview}')
@@ -34,21 +37,13 @@ class Mico:
     def __init__(self):
         self._agent_cache: dict[str, tuple[str, str, Agent]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self.bus: Any = None  # set by web.py after bus creation
 
-    def _build_system_message(self, persona: str) -> str:
-        base = (
-            'You are Mico, a persistent agent with one continuous brain. '
-            'Use memory/message tools when helpful, but only on demand. '
-            'You can create, update, and delete semantic memories autonomously. '
-            'When searching old chat content, use message search tools.'
-        )
-        persona_text = persona.strip()
-        if not persona_text:
-            return base
-        return f'{base}\n\nAgent persona:\n{persona_text}'
+    def _build_system_message(self) -> str:
+        return SYSTEM_PROMPT.format(date=datetime.now().strftime('%A, %B %d, %Y'))
 
-    def _build_history_input(self, *, agent_id: str, token_budget: int = 20_000) -> list[Message]:
-        rows = compact.select_recent_messages_for_context(agent_id=agent_id, token_budget=token_budget)
+    async def _build_history_input(self, *, agent_id: str, token_budget: int = 20_000) -> list[Message]:
+        rows = await compact.select_recent_messages_for_context(agent_id=agent_id, token_budget=token_budget)
         history: list[Message] = []
         for row in rows:
             role = str(row.role)
@@ -64,7 +59,7 @@ class Mico:
         return history
 
     async def _get_agent(self, *, agent_row: storage.AgentRecord) -> Agent:
-        system_message = self._build_system_message(agent_row.persona)
+        system_message = self._build_system_message()
         model_name = CONFIG.model.openrouter_model
         cached = self._agent_cache.get(agent_row.id)
         if cached and cached[0] == system_message and cached[1] == model_name:
@@ -72,7 +67,7 @@ class Mico:
 
         logger.info(f'[agent:{agent_row.id[:8]}] building agent | model={model_name}')
         agent = Agent(
-            model=get_model(),
+            model=await get_model(),
             system_message=system_message,
             tools=TOOLS,
             tool_hooks=[_tool_hook],
@@ -133,16 +128,16 @@ class Mico:
         tag = agent_id[:8]
         t0 = time.perf_counter()
 
-        agent_row = storage.get_agent(agent_id)
+        agent_row = await storage.get_agent(agent_id)
         if agent_row is None:
             raise ValueError(f"Agent '{agent_id}' not found.")
 
         t_compact = time.perf_counter()
-        compact.compact_conversation_if_needed(agent_id=agent_id)
+        await compact.compact_conversation_if_needed(agent_id=agent_id)
         logger.debug(f'[{tag}] compact check done in {(time.perf_counter() - t_compact) * 1000:.0f}ms')
 
         t_history = time.perf_counter()
-        history_input: list[Message] = self._build_history_input(agent_id=agent_id)
+        history_input: list[Message] = await self._build_history_input(agent_id=agent_id)
         context_msgs = len(history_input)
         logger.debug(
             f'[{tag}] context built: {context_msgs} messages in {(time.perf_counter() - t_history) * 1000:.0f}ms'
@@ -160,6 +155,8 @@ class Mico:
             f'[{tag}] agent {"from cache" if cached else "rebuilt"} in {(time.perf_counter() - t_agent) * 1000:.0f}ms'
         )
 
+        pending_outbound: list[OutboundMessage] = []
+
         chunks: list[str] = []
         run_output: RunOutput | None = None
         t_stream_start = time.perf_counter()
@@ -170,7 +167,11 @@ class Mico:
 
         agent_stream = agent.arun(
             input=history_input if history_input else (user_input or system_input or ''),
-            session_state={'agent_id': agent_id, 'runtime': get_runtime_manager()},
+            session_state={
+                'agent_id': agent_id,
+                'runtime': get_runtime_manager(),
+                'pending_outbound': pending_outbound,
+            },
             stream=True,
             stream_events=True,
             yield_run_output=True,
@@ -201,20 +202,25 @@ class Mico:
         content = str(run_output.content) if run_output and run_output.content is not None else ''.join(chunks)
 
         t_save = time.perf_counter()
-        now = int(time.time())
+        ts_now = int(time.time())
         event_metadata = {
             **metadata,
             **({k: v for k, v in {'channel': channel, 'chat_id': chat_id, 'sender_id': sender_id}.items() if v}),
         }
 
-        def _save(role: str, text: str | None) -> None:
+        async def _save(role: str, text: str | None) -> None:
             if text and text.strip():
-                storage.add_message(agent_id=agent_id, role=role, content=text.strip(), timestamp=now, metadata=event_metadata)
+                await storage.add_message(agent_id=agent_id, role=role, content=text.strip(), timestamp=ts_now, metadata=event_metadata)
 
-        _save('system', system_input)
-        _save('user', user_input)
-        _save('assistant', content if content.strip() else None)
+        await _save('system', system_input)
+        await _save('user', user_input)
+        await _save('assistant', content if content.strip() else None)
         logger.debug(f'[{tag}] messages saved in {(time.perf_counter() - t_save) * 1000:.0f}ms')
+
+        if self.bus and pending_outbound:
+            for msg in pending_outbound:
+                await self.bus.publish_outbound(msg)
+            logger.debug(f'[{tag}] published {len(pending_outbound)} outbound message(s) from tools')
 
         total_elapsed = time.perf_counter() - t0
         ttft_ms = f'{(t_first_token - t_stream_start) * 1000:.0f}ms' if t_first_token else 'n/a'
