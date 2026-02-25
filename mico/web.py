@@ -21,6 +21,7 @@ from . import config as app_config
 from .config import CONFIG
 from .messages import InboundMessage
 from .runtime import get_runtime_manager, reset_runtime_manager
+from .scheduler import SchedulerWorker
 
 TEMPLATES_DIR = Path(__file__).parent / 'templates'
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -32,15 +33,16 @@ _bus: MessageBus | None = None
 _agent_worker: AgentMessageWorker | None = None
 _outbound_worker: OutboundMessageWorker | None = None
 _channel_manager: ChannelManager | None = None
+_scheduler_worker: SchedulerWorker | None = None
 _pipeline_lock = asyncio.Lock()
 
 
-def _ensure_storage() -> None:
+async def _ensure_storage() -> None:
     global _storage_initialized
     if _storage_initialized:
         return
     db_path = os.getenv('MICO_DB_PATH') or paths.db_path()
-    storage.init_storage(db_path=db_path)
+    await storage.init_storage(db_path=db_path)
     _storage_initialized = True
 
 
@@ -49,11 +51,14 @@ def _telegram_autostart_enabled() -> bool:
 
 
 async def _start_background_workers() -> None:
-    global _bus, _agent_worker, _outbound_worker, _channel_manager
+    global _bus, _agent_worker, _outbound_worker, _channel_manager, _scheduler_worker
 
     async with _pipeline_lock:
         if _bus is None:
             _bus = MessageBus()
+
+        _mico.bus = _bus
+
         if _agent_worker is None:
             _agent_worker = AgentMessageWorker(bus=_bus, mico=_mico)
         if _outbound_worker is None:
@@ -63,19 +68,27 @@ async def _start_background_workers() -> None:
                 bus=_bus,
                 telegram_enabled=_telegram_autostart_enabled(),
             )
+        if _scheduler_worker is None:
+            _scheduler_worker = SchedulerWorker(mico=_mico)
 
         await _agent_worker.start()
         await _outbound_worker.start()
         await _channel_manager.start()
+        await _scheduler_worker.start()
 
         if not _telegram_autostart_enabled():
             logger.info('Web Telegram autostart is disabled by app config.')
 
 
 async def _stop_background_workers() -> None:
-    global _channel_manager, _outbound_worker, _agent_worker, _bus
+    global _channel_manager, _outbound_worker, _agent_worker, _bus, _scheduler_worker
 
     async with _pipeline_lock:
+        if _scheduler_worker is not None:
+            with suppress(Exception):
+                await _scheduler_worker.stop()
+            _scheduler_worker = None
+
         if _channel_manager is not None:
             with suppress(Exception):
                 await _channel_manager.stop()
@@ -91,6 +104,7 @@ async def _stop_background_workers() -> None:
                 await _agent_worker.stop()
             _agent_worker = None
 
+        _mico.bus = None
         _bus = None
 
 
@@ -114,7 +128,10 @@ def _require_bus() -> MessageBus:
 
 @app.on_event('startup')
 async def _startup() -> None:
-    _ensure_storage()
+    await _ensure_storage()
+    removed = await get_runtime_manager().cleanup_orphaned_containers()
+    if removed:
+        logger.info('Removed orphaned containers: %s', removed)
     await _start_background_workers()
 
 
@@ -164,8 +181,8 @@ def _redirect_with_query(
     return RedirectResponse(url=url, status_code=303)
 
 
-def _require_agent(identifier: str) -> storage.AgentRecord:
-    row = storage.find_agent(identifier)
+async def _require_agent(identifier: str) -> storage.AgentRecord:
+    row = await storage.find_agent(identifier)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Agent '{identifier}' not found")
     return row
@@ -204,11 +221,11 @@ async def home() -> RedirectResponse:
 
 @app.get('/agents', response_class=HTMLResponse)
 async def agents_page(request: Request) -> HTMLResponse:
-    _ensure_storage()
-    rows = agents.list_agents()
+    await _ensure_storage()
+    rows = await agents.list_agents()
     channel_map: dict[str, list[storage.AgentChannelRecord]] = {}
     for row in rows:
-        channel_map[row.id] = storage.list_agent_channels(agent_id=row.id)
+        channel_map[row.id] = await storage.list_agent_channels(agent_id=row.id)
 
     return templates.TemplateResponse(
         request=request,
@@ -224,9 +241,9 @@ async def agents_page(request: Request) -> HTMLResponse:
 
 @app.get('/config', response_class=HTMLResponse)
 async def config_page(request: Request) -> HTMLResponse:
-    _ensure_storage()
-    payload = app_config.get_app_config_payload()
-    typed = app_config.get_app_config()
+    await _ensure_storage()
+    payload = await app_config.get_app_config_payload()
+    typed = await app_config.get_app_config()
     return templates.TemplateResponse(
         request=request,
         name='config.html',
@@ -249,7 +266,7 @@ async def config_page(request: Request) -> HTMLResponse:
 async def config_update(
     config_json: str = Form(...),
 ) -> RedirectResponse:
-    _ensure_storage()
+    await _ensure_storage()
     raw = config_json.strip()
     if not raw:
         return _redirect('/config', error='Config JSON cannot be empty.')
@@ -262,7 +279,7 @@ async def config_update(
         return _redirect('/config', error='Config JSON must be an object at the top level.')
 
     try:
-        app_config.set_app_config(parsed)
+        await app_config.set_app_config(parsed)
     except Exception as exc:
         return _redirect('/config', error=f'Failed to save config: {exc}')
 
@@ -277,15 +294,14 @@ async def config_update(
 @app.post('/agents')
 async def create_agent(
     name: str = Form(...),
-    persona: str = Form(''),
 ) -> RedirectResponse:
-    _ensure_storage()
+    await _ensure_storage()
     clean_name = name.strip()
     if not clean_name:
         return _redirect('/agents', error='Agent name is required.')
 
     try:
-        row = agents.create_agent(name=clean_name, persona=persona)
+        row = await agents.create_agent(name=clean_name)
     except Exception as exc:
         return _redirect('/agents', error=f'Could not create agent: {exc}')
     return _redirect(f'/agents/{row.id}', ok=f"Agent '{row.name}' created.")
@@ -293,11 +309,11 @@ async def create_agent(
 
 @app.get('/agents/{identifier}', response_class=HTMLResponse)
 async def agent_detail(request: Request, identifier: str) -> HTMLResponse:
-    _ensure_storage()
-    row = _require_agent(identifier)
-    channels = storage.list_agent_channels(agent_id=row.id)
-    telegram = storage.get_agent_channel(agent_id=row.id, channel='telegram')
-    recent_messages = storage.list_recent_messages(agent_id=row.id, limit=30)
+    await _ensure_storage()
+    row = await _require_agent(identifier)
+    channels = await storage.list_agent_channels(agent_id=row.id)
+    telegram = await storage.get_agent_channel(agent_id=row.id, channel='telegram')
+    recent_messages = await storage.list_recent_messages(agent_id=row.id, limit=30)
 
     telegram_config = telegram.config if telegram is not None else {}
     allow_ids = telegram_config.get('allowed_chat_ids')
@@ -315,7 +331,7 @@ async def agent_detail(request: Request, identifier: str) -> HTMLResponse:
     selected_file = request.query_params.get('file')
 
     try:
-        listed = manager.list_files(agent_id=row.id, path=browse_path)
+        listed = await manager.list_files(agent_id=row.id, path=browse_path)
         for item in listed:
             is_dir = item.endswith('/')
             pure = item[:-1] if is_dir else item
@@ -337,7 +353,7 @@ async def agent_detail(request: Request, identifier: str) -> HTMLResponse:
 
     if selected_file:
         try:
-            file_content = manager.read_file(agent_id=row.id, path=selected_file)
+            file_content = await manager.read_file(agent_id=row.id, path=selected_file)
             file_content = _truncate(file_content, limit=60_000)
         except Exception as exc:
             file_error = str(exc)
@@ -365,17 +381,6 @@ async def agent_detail(request: Request, identifier: str) -> HTMLResponse:
     )
 
 
-@app.post('/agents/{identifier}/persona')
-async def update_persona(
-    identifier: str,
-    persona: str = Form(''),
-) -> RedirectResponse:
-    _ensure_storage()
-    row = _require_agent(identifier)
-    agents.update_agent_persona(agent_id=row.id, persona=persona.strip())
-    return _redirect(f'/agents/{row.id}', ok='Persona updated.')
-
-
 @app.post('/agents/{identifier}/telegram')
 async def update_telegram(
     identifier: str,
@@ -383,8 +388,8 @@ async def update_telegram(
     bot_token: str = Form(''),
     allowed_chat_ids: str = Form(''),
 ) -> RedirectResponse:
-    _ensure_storage()
-    row = _require_agent(identifier)
+    await _ensure_storage()
+    row = await _require_agent(identifier)
     is_enabled = enabled == 'on'
 
     allow_ids: list[str] = []
@@ -401,7 +406,7 @@ async def update_telegram(
         'bot_token': bot_token.strip(),
         'allowed_chat_ids': allow_ids,
     }
-    agents.configure_channel(
+    await agents.configure_channel(
         agent_id=row.id,
         channel='telegram',
         enabled=is_enabled,
@@ -420,8 +425,8 @@ async def prompt_agent(
     identifier: str,
     prompt: str = Form(...),
 ) -> RedirectResponse:
-    _ensure_storage()
-    row = _require_agent(identifier)
+    await _ensure_storage()
+    row = await _require_agent(identifier)
     clean = prompt.strip()
     if not clean:
         return _redirect(f'/agents/{row.id}', error='Prompt cannot be empty.')
@@ -449,8 +454,8 @@ async def chat_agent(
     identifier: str,
     message: str = Form(...),
 ) -> RedirectResponse:
-    _ensure_storage()
-    row = _require_agent(identifier)
+    await _ensure_storage()
+    row = await _require_agent(identifier)
     clean = message.strip()
     if not clean:
         return _redirect_with_query(f'/agents/{row.id}', query={'tab': 'chat'}, error='Message cannot be empty.')
@@ -475,8 +480,8 @@ async def chat_agent(
 
 @app.post('/api/agents/{identifier}/chat')
 async def api_chat_agent(request: Request, identifier: str) -> JSONResponse:
-    _ensure_storage()
-    row = _require_agent(identifier)
+    await _ensure_storage()
+    row = await _require_agent(identifier)
     try:
         body = await request.json()
     except Exception:
@@ -501,7 +506,7 @@ async def api_chat_agent(request: Request, identifier: str) -> JSONResponse:
     except Exception as exc:
         return JSONResponse({'error': f'Chat failed: {exc}'}, status_code=500)
 
-    messages = storage.list_recent_messages(agent_id=row.id, limit=50)
+    messages = await storage.list_recent_messages(agent_id=row.id, limit=50)
     return JSONResponse(
         {
             'success': True,
@@ -520,9 +525,9 @@ async def api_chat_agent(request: Request, identifier: str) -> JSONResponse:
 
 @app.get('/api/agents/{identifier}/messages')
 async def api_get_messages(identifier: str, since: int = 0, limit: int = 50) -> JSONResponse:
-    _ensure_storage()
-    row = _require_agent(identifier)
-    messages = storage.list_recent_messages(agent_id=row.id, limit=limit)
+    await _ensure_storage()
+    row = await _require_agent(identifier)
+    messages = await storage.list_recent_messages(agent_id=row.id, limit=limit)
     filtered = [m for m in messages if m.timestamp > since]
     return JSONResponse(
         {
@@ -544,23 +549,23 @@ async def workspace_open(
     identifier: str,
     path: str = Form('.'),
 ) -> RedirectResponse:
-    _ensure_storage()
-    row = _require_agent(identifier)
+    await _ensure_storage()
+    row = await _require_agent(identifier)
     browse = _normalize_browse_path(path)
     return _redirect_with_query(f'/agents/{row.id}', query={'tab': 'workspace', 'path': browse})
 
 
 @app.post('/agents/{identifier}/delete')
 async def delete_agent(identifier: str) -> RedirectResponse:
-    _ensure_storage()
-    row = _require_agent(identifier)
+    await _ensure_storage()
+    row = await _require_agent(identifier)
     try:
-        get_runtime_manager().delete_agent_runtime(row.id)
+        await get_runtime_manager().delete_agent_runtime(row.id)
     except Exception:
         # Runtime cleanup failures shouldn't block data deletion.
         pass
 
-    deleted = agents.delete_agent(row.id)
+    deleted = await agents.delete_agent(row.id)
     if not deleted:
         return _redirect('/agents', error=f"Could not delete agent '{row.name}'.")
     return _redirect('/agents', ok=f"Agent '{row.name}' deleted.")
