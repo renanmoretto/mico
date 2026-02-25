@@ -1,14 +1,16 @@
+import asyncio
 import json
 import sqlite3
-import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+import aiosqlite
+
 MessageRole = Literal['user', 'assistant', 'tool', 'system']
-SCHEMA_VERSION = '3'
+SCHEMA_VERSION = '5'
 
 _storage_instance: 'SqliteStorage | None' = None
 
@@ -17,7 +19,6 @@ _storage_instance: 'SqliteStorage | None' = None
 class AgentRecord:
     id: str
     name: str
-    persona: str
     status: str
     runtime: dict[str, Any]
     metadata: dict[str, Any]
@@ -59,19 +60,44 @@ class MemoryRecord:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ScheduledJobRecord:
+    id: str
+    agent_id: str
+    description: str
+    instruction: str
+    job_type: str  # 'once' | 'recurring'
+    cron_expr: str | None
+    next_run_at: int
+    last_run_at: int | None
+    status: str  # 'active' | 'paused' | 'completed'
+    created_at: int
+    updated_at: int
+
+
 def _require_storage() -> 'SqliteStorage':
     if _storage_instance is None:
         raise RuntimeError('Storage is not initialized. Call init_storage() before using storage-backed modules.')
     return _storage_instance
 
 
-def init_storage(db_path: str | None = None) -> 'SqliteStorage':
+async def init_storage(db_path: str | None = None) -> 'SqliteStorage':
     if db_path is None:
         from .paths import db_path as get_db_path
 
         db_path = get_db_path()
     global _storage_instance
-    _storage_instance = SqliteStorage.from_path(db_path=db_path)
+    path = Path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = await aiosqlite.connect(path)
+    conn.row_factory = sqlite3.Row
+    await conn.execute('PRAGMA journal_mode=WAL')
+    await conn.execute('PRAGMA busy_timeout = 5000;')
+    await conn.execute('PRAGMA synchronous = NORMAL;')
+    await conn.execute('PRAGMA foreign_keys = ON;')
+    storage = SqliteStorage(conn=conn)
+    await storage._ensure_schema()
+    _storage_instance = storage
     return _storage_instance
 
 
@@ -84,42 +110,27 @@ def __getattr__(name: str):
 
 
 class SqliteStorage:
-    def __init__(self, conn: sqlite3.Connection):
+    def __init__(self, conn: aiosqlite.Connection):
         self._conn = conn
-        self._lock = threading.RLock()
+        self._lock = asyncio.Lock()
 
-    @classmethod
-    def from_path(cls, db_path: str | None = None) -> 'SqliteStorage':
-        if db_path is None:
-            from .paths import db_path as get_db_path
-
-            db_path = get_db_path()
-        path = Path(db_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(
-            path,
-            check_same_thread=False,
-        )
-        conn.row_factory = sqlite3.Row
-        conn.execute('PRAGMA busy_timeout = 5000;')
-        conn.execute('PRAGMA journal_mode = WAL;')
-        conn.execute('PRAGMA synchronous = NORMAL;')
-        conn.execute('PRAGMA foreign_keys = ON;')
-
-        storage = cls(conn=conn)
-        storage._ensure_schema()
-        return storage
-
-    def _ensure_schema(self) -> None:
-        with self._lock:
-            self._conn.execute('CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
-            row = self._conn.execute("SELECT value FROM app_meta WHERE key = 'schema_version' LIMIT 1").fetchone()
+    async def _ensure_schema(self) -> None:
+        async with self._lock:
+            async with self._conn.execute(
+                'CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)'
+            ) as cursor:
+                pass
+            async with self._conn.execute(
+                "SELECT value FROM app_meta WHERE key = 'schema_version' LIMIT 1"
+            ) as cursor:
+                row = await cursor.fetchone()
             current = str(row['value']) if row is not None else None
 
             if current != SCHEMA_VERSION:
                 # No backward compatibility required: rebuild to keep schema simple.
-                self._conn.executescript(
+                await self._conn.executescript(
                     """
+                    DROP TABLE IF EXISTS scheduled_jobs;
                     DROP TABLE IF EXISTS config;
                     DROP TABLE IF EXISTS agent_channels;
                     DROP TABLE IF EXISTS memories;
@@ -129,7 +140,6 @@ class SqliteStorage:
                     CREATE TABLE agents (
                         id TEXT PRIMARY KEY,
                         name TEXT NOT NULL UNIQUE,
-                        persona TEXT NOT NULL DEFAULT '',
                         status TEXT NOT NULL DEFAULT 'active',
                         runtime_json TEXT NOT NULL DEFAULT '{}',
                         meta_json TEXT NOT NULL DEFAULT '{}',
@@ -189,14 +199,33 @@ class SqliteStorage:
                     CREATE INDEX idx_memories_agent_updated ON memories(agent_id, updated_at);
                     CREATE INDEX idx_memories_agent_strength ON memories(agent_id, strength);
                     CREATE INDEX idx_agent_channels_lookup ON agent_channels(agent_id, channel);
+
+                    CREATE TABLE scheduled_jobs (
+                        id TEXT PRIMARY KEY,
+                        agent_id TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        instruction TEXT NOT NULL,
+                        job_type TEXT NOT NULL,
+                        cron_expr TEXT,
+                        next_run_at INTEGER NOT NULL,
+                        last_run_at INTEGER,
+                        status TEXT NOT NULL DEFAULT 'active',
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
+                        CHECK (job_type IN ('once', 'recurring')),
+                        CHECK (status IN ('active', 'paused', 'completed'))
+                    );
+                    CREATE INDEX idx_scheduled_jobs_due ON scheduled_jobs(next_run_at)
+                        WHERE status = 'active';
                     """
                 )
-                self._conn.execute(
+                await self._conn.execute(
                     "INSERT INTO app_meta (key, value) VALUES ('schema_version', ?) "
                     'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
                     (SCHEMA_VERSION,),
                 )
-            self._conn.execute(
+            await self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS config (
                     key TEXT PRIMARY KEY,
@@ -206,7 +235,7 @@ class SqliteStorage:
                 )
                 """
             )
-            self._conn.commit()
+            await self._conn.commit()
 
     @staticmethod
     def _encode_json(value: dict[str, Any] | None) -> str:
@@ -230,7 +259,6 @@ class SqliteStorage:
         return AgentRecord(
             id=str(row['id']),
             name=str(row['name']),
-            persona=str(row['persona']),
             status=str(row['status']),
             runtime=SqliteStorage._decode_json(row['runtime_json']),
             metadata=SqliteStorage._decode_json(row['meta_json']),
@@ -263,6 +291,22 @@ class SqliteStorage:
         )
 
     @staticmethod
+    def _to_scheduled_job_record(row: sqlite3.Row) -> ScheduledJobRecord:
+        return ScheduledJobRecord(
+            id=str(row['id']),
+            agent_id=str(row['agent_id']),
+            description=str(row['description']),
+            instruction=str(row['instruction']),
+            job_type=str(row['job_type']),
+            cron_expr=str(row['cron_expr']) if row['cron_expr'] is not None else None,
+            next_run_at=int(row['next_run_at']),
+            last_run_at=int(row['last_run_at']) if row['last_run_at'] is not None else None,
+            status=str(row['status']),
+            created_at=int(row['created_at']),
+            updated_at=int(row['updated_at']),
+        )
+
+    @staticmethod
     def _to_memory_record(row: sqlite3.Row) -> MemoryRecord:
         return MemoryRecord(
             id=str(row['id']),
@@ -275,46 +319,46 @@ class SqliteStorage:
             metadata=SqliteStorage._decode_json(row['meta_json']),
         )
 
-    def _fetch_all(self, query: str, params: tuple = ()) -> list[sqlite3.Row]:
-        with self._lock:
-            return self._conn.execute(query, params).fetchall()
+    async def _fetch_all(self, query: str, params: tuple = ()) -> list[sqlite3.Row]:
+        async with self._lock:
+            async with self._conn.execute(query, params) as cursor:
+                return await cursor.fetchall()
 
-    def _fetch_one(self, query: str, params: tuple = ()) -> sqlite3.Row | None:
-        with self._lock:
-            return self._conn.execute(query, params).fetchone()
+    async def _fetch_one(self, query: str, params: tuple = ()) -> sqlite3.Row | None:
+        async with self._lock:
+            async with self._conn.execute(query, params) as cursor:
+                return await cursor.fetchone()
 
-    def _execute(self, query: str, params: tuple = ()) -> None:
-        with self._lock:
-            self._conn.execute(query, params)
-            self._conn.commit()
+    async def _execute(self, query: str, params: tuple = ()) -> None:
+        async with self._lock:
+            await self._conn.execute(query, params)
+            await self._conn.commit()
 
-    def _executemany(self, query: str, params: list[tuple]) -> None:
-        with self._lock:
-            self._conn.executemany(query, params)
-            self._conn.commit()
+    async def _executemany(self, query: str, params: list[tuple]) -> None:
+        async with self._lock:
+            await self._conn.executemany(query, params)
+            await self._conn.commit()
 
     # Agents
 
-    def create_agent(
+    async def create_agent(
         self,
         *,
         name: str,
-        persona: str,
         created_at: int,
         runtime: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
         agent_id: str | None = None,
     ) -> str:
         record_id = agent_id or str(uuid.uuid4())
-        self._execute(
+        await self._execute(
             """
-            INSERT INTO agents (id, name, persona, status, runtime_json, meta_json, created_at, updated_at)
-            VALUES (?, ?, ?, 'active', ?, ?, ?, ?)
+            INSERT INTO agents (id, name, status, runtime_json, meta_json, created_at, updated_at)
+            VALUES (?, ?, 'active', ?, ?, ?, ?)
             """,
             (
                 record_id,
                 name,
-                persona,
                 self._encode_json(runtime),
                 self._encode_json(metadata),
                 created_at,
@@ -323,34 +367,31 @@ class SqliteStorage:
         )
         return record_id
 
-    def upsert_agent(
+    async def upsert_agent(
         self,
         *,
         name: str,
-        persona: str,
         updated_at: int,
         runtime: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> str:
-        row = self._fetch_one('SELECT id FROM agents WHERE name = ? LIMIT 1', (name,))
+        row = await self._fetch_one('SELECT id FROM agents WHERE name = ? LIMIT 1', (name,))
         if row is None:
-            return self.create_agent(
+            return await self.create_agent(
                 name=name,
-                persona=persona,
                 created_at=updated_at,
                 runtime=runtime,
                 metadata=metadata,
             )
 
         agent_id = str(row['id'])
-        self._execute(
+        await self._execute(
             """
             UPDATE agents
-            SET persona = ?, runtime_json = ?, meta_json = ?, updated_at = ?, status = 'active'
+            SET runtime_json = ?, meta_json = ?, updated_at = ?, status = 'active'
             WHERE id = ?
             """,
             (
-                persona,
                 self._encode_json(runtime),
                 self._encode_json(metadata),
                 updated_at,
@@ -359,10 +400,10 @@ class SqliteStorage:
         )
         return agent_id
 
-    def get_agent(self, agent_id: str) -> AgentRecord | None:
-        row = self._fetch_one(
+    async def get_agent(self, agent_id: str) -> AgentRecord | None:
+        row = await self._fetch_one(
             """
-            SELECT id, name, persona, status, runtime_json, meta_json, created_at, updated_at
+            SELECT id, name, status, runtime_json, meta_json, created_at, updated_at
             FROM agents
             WHERE id = ?
             LIMIT 1
@@ -371,10 +412,10 @@ class SqliteStorage:
         )
         return self._to_agent_record(row) if row is not None else None
 
-    def find_agent(self, identifier: str) -> AgentRecord | None:
-        row = self._fetch_one(
+    async def find_agent(self, identifier: str) -> AgentRecord | None:
+        row = await self._fetch_one(
             """
-            SELECT id, name, persona, status, runtime_json, meta_json, created_at, updated_at
+            SELECT id, name, status, runtime_json, meta_json, created_at, updated_at
             FROM agents
             WHERE id = ? OR name = ?
             LIMIT 1
@@ -383,10 +424,10 @@ class SqliteStorage:
         )
         return self._to_agent_record(row) if row is not None else None
 
-    def list_agents(self) -> list[AgentRecord]:
-        rows = self._fetch_all(
+    async def list_agents(self) -> list[AgentRecord]:
+        rows = await self._fetch_all(
             """
-            SELECT id, name, persona, status, runtime_json, meta_json, created_at, updated_at
+            SELECT id, name, status, runtime_json, meta_json, created_at, updated_at
             FROM agents
             WHERE status != 'deleted'
             ORDER BY created_at ASC
@@ -394,36 +435,33 @@ class SqliteStorage:
         )
         return [self._to_agent_record(row) for row in rows]
 
-    def update_agent(
+    async def update_agent(
         self,
         *,
         agent_id: str,
         updated_at: int,
         name: str | None = None,
-        persona: str | None = None,
         status: str | None = None,
         runtime: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> bool:
-        current = self.get_agent(agent_id)
+        current = await self.get_agent(agent_id)
         if current is None:
             return False
 
         next_name = name if name is not None else current.name
-        next_persona = persona if persona is not None else current.persona
         next_status = status if status is not None else current.status
         next_runtime = runtime if runtime is not None else current.runtime
         next_meta = metadata if metadata is not None else current.metadata
 
-        self._execute(
+        await self._execute(
             """
             UPDATE agents
-            SET name = ?, persona = ?, status = ?, runtime_json = ?, meta_json = ?, updated_at = ?
+            SET name = ?, status = ?, runtime_json = ?, meta_json = ?, updated_at = ?
             WHERE id = ?
             """,
             (
                 next_name,
-                next_persona,
                 next_status,
                 self._encode_json(next_runtime),
                 self._encode_json(next_meta),
@@ -433,15 +471,15 @@ class SqliteStorage:
         )
         return True
 
-    def delete_agent(self, agent_id: str) -> bool:
-        with self._lock:
-            cursor = self._conn.execute('DELETE FROM agents WHERE id = ?', (agent_id,))
-            self._conn.commit()
+    async def delete_agent(self, agent_id: str) -> bool:
+        async with self._lock:
+            cursor = await self._conn.execute('DELETE FROM agents WHERE id = ?', (agent_id,))
+            await self._conn.commit()
             return cursor.rowcount > 0
 
     # Agent channels
 
-    def upsert_agent_channel(
+    async def upsert_agent_channel(
         self,
         *,
         agent_id: str,
@@ -451,7 +489,7 @@ class SqliteStorage:
         config: dict[str, Any] | None = None,
     ) -> str:
         new_id = str(uuid.uuid4())
-        self._execute(
+        await self._execute(
             """
             INSERT INTO agent_channels (id, agent_id, channel, enabled, config_json, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -462,11 +500,11 @@ class SqliteStorage:
             """,
             (new_id, agent_id, channel, 1 if enabled else 0, self._encode_json(config), updated_at, updated_at),
         )
-        row = self._fetch_one('SELECT id FROM agent_channels WHERE agent_id = ? AND channel = ?', (agent_id, channel))
+        row = await self._fetch_one('SELECT id FROM agent_channels WHERE agent_id = ? AND channel = ?', (agent_id, channel))
         return str(row['id'])
 
-    def get_agent_channel(self, *, agent_id: str, channel: str) -> AgentChannelRecord | None:
-        row = self._fetch_one(
+    async def get_agent_channel(self, *, agent_id: str, channel: str) -> AgentChannelRecord | None:
+        row = await self._fetch_one(
             """
             SELECT id, agent_id, channel, enabled, config_json, created_at, updated_at
             FROM agent_channels
@@ -477,19 +515,19 @@ class SqliteStorage:
         )
         return self._to_agent_channel_record(row) if row is not None else None
 
-    def list_agent_channels(self, *, agent_id: str, enabled_only: bool = False) -> list[AgentChannelRecord]:
+    async def list_agent_channels(self, *, agent_id: str, enabled_only: bool = False) -> list[AgentChannelRecord]:
         extra = ' AND enabled = 1' if enabled_only else ''
-        rows = self._fetch_all(
+        rows = await self._fetch_all(
             f'SELECT id, agent_id, channel, enabled, config_json, created_at, updated_at '
             f'FROM agent_channels WHERE agent_id = ?{extra} ORDER BY channel ASC',
             (agent_id,),
         )
         return [self._to_agent_channel_record(row) for row in rows]
 
-    def list_enabled_agent_channels(self, channel: str | None = None) -> list[AgentChannelRecord]:
+    async def list_enabled_agent_channels(self, channel: str | None = None) -> list[AgentChannelRecord]:
         extra = ' AND channel = ?' if channel is not None else ''
         params = (channel,) if channel is not None else ()
-        rows = self._fetch_all(
+        rows = await self._fetch_all(
             f'SELECT id, agent_id, channel, enabled, config_json, created_at, updated_at '
             f'FROM agent_channels WHERE enabled = 1{extra} ORDER BY agent_id ASC',
             params,
@@ -498,8 +536,8 @@ class SqliteStorage:
 
     # App config
 
-    def get_config(self, *, key: str = 'app') -> dict[str, Any] | None:
-        row = self._fetch_one(
+    async def get_config(self, *, key: str = 'app') -> dict[str, Any] | None:
+        row = await self._fetch_one(
             """
             SELECT config_json
             FROM config
@@ -512,9 +550,9 @@ class SqliteStorage:
             return None
         return self._decode_json(row['config_json'])
 
-    def upsert_config(self, *, key: str = 'app', config: dict[str, Any]) -> None:
+    async def upsert_config(self, *, key: str = 'app', config: dict[str, Any]) -> None:
         now = int(time.time())
-        self._execute(
+        await self._execute(
             """
             INSERT INTO config (key, config_json, created_at, updated_at)
             VALUES (?, ?, ?, ?)
@@ -527,7 +565,7 @@ class SqliteStorage:
 
     # Messages
 
-    def add_message(
+    async def add_message(
         self,
         *,
         agent_id: str,
@@ -537,7 +575,7 @@ class SqliteStorage:
         metadata: dict[str, Any] | None = None,
     ) -> str:
         message_id = str(uuid.uuid4())
-        self._execute(
+        await self._execute(
             """
             INSERT INTO messages (id, agent_id, timestamp, role, content, meta_json)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -546,8 +584,8 @@ class SqliteStorage:
         )
         return message_id
 
-    def list_messages(self, *, agent_id: str) -> list[MessageRecord]:
-        rows = self._fetch_all(
+    async def list_messages(self, *, agent_id: str) -> list[MessageRecord]:
+        rows = await self._fetch_all(
             """
             SELECT id, agent_id, timestamp, role, content, meta_json
             FROM messages
@@ -558,8 +596,8 @@ class SqliteStorage:
         )
         return [self._to_message_record(row) for row in rows]
 
-    def list_recent_messages(self, *, agent_id: str, limit: int) -> list[MessageRecord]:
-        rows = self._fetch_all(
+    async def list_recent_messages(self, *, agent_id: str, limit: int) -> list[MessageRecord]:
+        rows = await self._fetch_all(
             """
             SELECT id, agent_id, timestamp, role, content, meta_json
             FROM (
@@ -575,8 +613,8 @@ class SqliteStorage:
         )
         return [self._to_message_record(row) for row in rows]
 
-    def list_messages_with_order(self, *, agent_id: str) -> list[MessageRecord]:
-        rows = self._fetch_all(
+    async def list_messages_with_order(self, *, agent_id: str) -> list[MessageRecord]:
+        rows = await self._fetch_all(
             """
             SELECT rowid AS insert_order, id, agent_id, timestamp, role, content, meta_json
             FROM messages
@@ -587,8 +625,8 @@ class SqliteStorage:
         )
         return [self._to_message_record(row) for row in rows]
 
-    def search_messages(self, *, agent_id: str, query: str, limit: int) -> list[MessageRecord]:
-        rows = self._fetch_all(
+    async def search_messages(self, *, agent_id: str, query: str, limit: int) -> list[MessageRecord]:
+        rows = await self._fetch_all(
             """
             SELECT id, agent_id, timestamp, role, content, meta_json
             FROM messages
@@ -600,17 +638,17 @@ class SqliteStorage:
         )
         return [self._to_message_record(row) for row in rows]
 
-    def delete_messages(self, *, agent_id: str, message_ids: list[str]) -> None:
+    async def delete_messages(self, *, agent_id: str, message_ids: list[str]) -> None:
         if not message_ids:
             return
-        self._executemany(
+        await self._executemany(
             'DELETE FROM messages WHERE agent_id = ? AND id = ?',
             [(agent_id, message_id) for message_id in message_ids],
         )
 
     # Memories
 
-    def upsert_memory(
+    async def upsert_memory(
         self,
         *,
         agent_id: str,
@@ -622,7 +660,7 @@ class SqliteStorage:
         metadata: dict[str, Any] | None = None,
     ) -> None:
         memory_id = str(uuid.uuid4())
-        self._execute(
+        await self._execute(
             """
             INSERT INTO memories (
                 id, agent_id, name, created_at, updated_at, last_accessed, access_count,
@@ -649,8 +687,8 @@ class SqliteStorage:
             ),
         )
 
-    def find_memory(self, *, agent_id: str, identifier: str) -> MemoryRecord | None:
-        row = self._fetch_one(
+    async def find_memory(self, *, agent_id: str, identifier: str) -> MemoryRecord | None:
+        row = await self._fetch_one(
             """
             SELECT id, agent_id, name, summary, content, strength, updated_at, meta_json
             FROM memories
@@ -661,7 +699,7 @@ class SqliteStorage:
         )
         return self._to_memory_record(row) if row is not None else None
 
-    def update_memory(
+    async def update_memory(
         self,
         *,
         agent_id: str,
@@ -673,7 +711,7 @@ class SqliteStorage:
         updated_at: int,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        self._execute(
+        await self._execute(
             """
             UPDATE memories
             SET name = ?, summary = ?, content = ?, strength = ?, updated_at = ?, meta_json = ?
@@ -691,12 +729,12 @@ class SqliteStorage:
             ),
         )
 
-    def delete_memory(self, *, agent_id: str, memory_id: str) -> None:
-        self._execute('DELETE FROM memories WHERE agent_id = ? AND id = ?', (agent_id, memory_id))
+    async def delete_memory(self, *, agent_id: str, memory_id: str) -> None:
+        await self._execute('DELETE FROM memories WHERE agent_id = ? AND id = ?', (agent_id, memory_id))
 
-    def search_memories(self, *, agent_id: str, query: str, limit: int) -> list[MemoryRecord]:
+    async def search_memories(self, *, agent_id: str, query: str, limit: int) -> list[MemoryRecord]:
         q = f'%{query.strip()}%'
-        rows = self._fetch_all(
+        rows = await self._fetch_all(
             """
             SELECT id, agent_id, name, strength, summary, content, updated_at, meta_json
             FROM memories
@@ -708,10 +746,10 @@ class SqliteStorage:
         )
         return [self._to_memory_record(row) for row in rows]
 
-    def touch_memories(self, *, agent_id: str, memory_ids: list[str], accessed_at: int) -> None:
+    async def touch_memories(self, *, agent_id: str, memory_ids: list[str], accessed_at: int) -> None:
         if not memory_ids:
             return
-        self._executemany(
+        await self._executemany(
             """
             UPDATE memories
             SET last_accessed = ?, access_count = access_count + 1
@@ -719,3 +757,66 @@ class SqliteStorage:
             """,
             [(accessed_at, agent_id, memory_id) for memory_id in memory_ids],
         )
+
+    # Scheduled jobs
+
+    async def create_scheduled_job(
+        self,
+        *,
+        agent_id: str,
+        description: str,
+        instruction: str,
+        job_type: str,
+        cron_expr: str | None,
+        next_run_at: int,
+        created_at: int,
+    ) -> str:
+        job_id = str(uuid.uuid4())
+        await self._execute(
+            """
+            INSERT INTO scheduled_jobs (id, agent_id, description, instruction, job_type, cron_expr, next_run_at, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+            """,
+            (job_id, agent_id, description, instruction, job_type, cron_expr, next_run_at, created_at, created_at),
+        )
+        return job_id
+
+    async def get_due_jobs(self, now: int) -> list[ScheduledJobRecord]:
+        rows = await self._fetch_all(
+            """
+            SELECT id, agent_id, description, instruction, job_type, cron_expr, next_run_at, last_run_at, status, created_at, updated_at
+            FROM scheduled_jobs
+            WHERE status = 'active' AND next_run_at <= ?
+            ORDER BY next_run_at ASC
+            """,
+            (now,),
+        )
+        return [self._to_scheduled_job_record(row) for row in rows]
+
+    async def update_job_after_run(self, *, job_id: str, next_run_at: int | None, status: str, last_run_at: int) -> None:
+        await self._execute(
+            """
+            UPDATE scheduled_jobs
+            SET next_run_at = ?, status = ?, last_run_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (next_run_at, status, last_run_at, last_run_at, job_id),
+        )
+
+    async def list_scheduled_jobs(self, *, agent_id: str) -> list[ScheduledJobRecord]:
+        rows = await self._fetch_all(
+            """
+            SELECT id, agent_id, description, instruction, job_type, cron_expr, next_run_at, last_run_at, status, created_at, updated_at
+            FROM scheduled_jobs
+            WHERE agent_id = ? AND status = 'active'
+            ORDER BY next_run_at ASC
+            """,
+            (agent_id,),
+        )
+        return [self._to_scheduled_job_record(row) for row in rows]
+
+    async def delete_scheduled_job(self, *, agent_id: str, job_id: str) -> bool:
+        async with self._lock:
+            cursor = await self._conn.execute('DELETE FROM scheduled_jobs WHERE id = ? AND agent_id = ?', (job_id, agent_id))
+            await self._conn.commit()
+            return cursor.rowcount > 0
