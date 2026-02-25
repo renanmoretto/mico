@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import os
-import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -144,7 +144,7 @@ class AppConfig:
 
 
 _APP_CONFIG_KEY = 'app'
-_MODEL_CACHE_LOCK = threading.RLock()
+_MODEL_CACHE_LOCK = asyncio.Lock()
 _MODEL_CACHE: tuple[str, OpenRouter] | None = None
 _DEFAULT_CONFIG = AppConfig()
 
@@ -173,14 +173,14 @@ def _default_payload() -> dict[str, Any]:
     }
 
 
-def _load_raw_payload() -> dict[str, Any]:
+async def _load_raw_payload() -> dict[str, Any]:
     defaults = _default_payload()
     if not storage.is_initialized():
         return copy.deepcopy(defaults)
 
-    current = storage.get_config(key=_APP_CONFIG_KEY)
+    current = await storage.get_config(key=_APP_CONFIG_KEY)
     if current is None:
-        storage.upsert_config(key=_APP_CONFIG_KEY, config=defaults)
+        await storage.upsert_config(key=_APP_CONFIG_KEY, config=defaults)
         return copy.deepcopy(defaults)
 
     return _deep_merge(defaults, _as_dict(current))
@@ -221,34 +221,34 @@ def _parse_app_config(raw: dict[str, Any]) -> AppConfig:
     )
 
 
-def get_app_config() -> AppConfig:
-    return _parse_app_config(_load_raw_payload())
+async def get_app_config() -> AppConfig:
+    return _parse_app_config(await _load_raw_payload())
 
 
-def get_app_config_payload() -> dict[str, Any]:
-    return copy.deepcopy(_load_raw_payload())
+async def get_app_config_payload() -> dict[str, Any]:
+    return copy.deepcopy(await _load_raw_payload())
 
 
-def set_app_config(config: dict[str, Any]) -> AppConfig:
+async def set_app_config(config: dict[str, Any]) -> AppConfig:
     if not storage.is_initialized():
         raise RuntimeError('Storage is not initialized. Call init_storage() before setting app config.')
     payload = _deep_merge(_default_payload(), _as_dict(config))
-    storage.upsert_config(key=_APP_CONFIG_KEY, config=payload)
-    with _MODEL_CACHE_LOCK:
+    await storage.upsert_config(key=_APP_CONFIG_KEY, config=payload)
+    async with _MODEL_CACHE_LOCK:
         global _MODEL_CACHE
         _MODEL_CACHE = None
     return _parse_app_config(payload)
 
 
-def update_app_config(patch: dict[str, Any]) -> AppConfig:
-    current = _load_raw_payload()
+async def update_app_config(patch: dict[str, Any]) -> AppConfig:
+    current = await _load_raw_payload()
     next_payload = _deep_merge(current, _as_dict(patch))
-    return set_app_config(next_payload)
+    return await set_app_config(next_payload)
 
 
-def get_model() -> OpenRouter:
-    model_name = get_app_config().model.openrouter_model
-    with _MODEL_CACHE_LOCK:
+async def get_model() -> OpenRouter:
+    model_name = (await get_app_config()).model.openrouter_model
+    async with _MODEL_CACHE_LOCK:
         global _MODEL_CACHE
         if _MODEL_CACHE is not None and _MODEL_CACHE[0] == model_name:
             return _MODEL_CACHE[1]
@@ -260,19 +260,19 @@ def get_model() -> OpenRouter:
 class _ConfigProxy:
     @property
     def model(self) -> ModelDefaults:
-        return get_app_config().model
+        return _DEFAULT_CONFIG.model
 
     @property
     def telegram(self) -> TelegramDefaults:
-        return get_app_config().telegram
+        return _DEFAULT_CONFIG.telegram
 
     @property
     def runtime(self) -> RuntimeDefaults:
-        return get_app_config().runtime
+        return _DEFAULT_CONFIG.runtime
 
     @property
     def web(self) -> WebDefaults:
-        return get_app_config().web
+        return _DEFAULT_CONFIG.web
 
 
 CONFIG = _ConfigProxy()
