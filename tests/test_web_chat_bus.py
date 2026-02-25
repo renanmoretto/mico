@@ -42,7 +42,7 @@ def test_web_chat_route_uses_bus_pipeline(tmp_path, monkeypatch) -> None:
     with TestClient(web.app) as client:
         created = client.post(
             '/agents',
-            data={'name': 'web-bus-agent', 'persona': ''},
+            data={'name': 'web-bus-agent'},
             follow_redirects=False,
         )
         assert created.status_code == 303
