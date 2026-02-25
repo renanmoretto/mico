@@ -54,13 +54,13 @@ def message_tokens(role: str, content: str, model: str = DEFAULT_TOKEN_MODEL) ->
     return 4 + count_tokens(role, model=model) + count_tokens(content, model=model)
 
 
-def select_recent_messages_for_context(
+async def select_recent_messages_for_context(
     *,
     agent_id: str,
     token_budget: int = 20_000,
     model: str = DEFAULT_TOKEN_MODEL,
 ) -> list[storage.MessageRecord]:
-    rows = storage.list_messages_with_order(agent_id=agent_id)
+    rows = await storage.list_messages_with_order(agent_id=agent_id)
     if not rows:
         return []
 
@@ -141,7 +141,7 @@ def _build_compaction_memory_payload(
     return memory_name, summary + '\n\n' + json.dumps(payload, ensure_ascii=True)
 
 
-def compact_conversation_if_needed(
+async def compact_conversation_if_needed(
     *,
     agent_id: str,
     threshold_tokens: int = 100_000,
@@ -155,7 +155,7 @@ def compact_conversation_if_needed(
     if target_tokens_after > threshold_tokens:
         raise ValueError('target_tokens_after must be <= threshold_tokens.')
 
-    rows = storage.list_messages_with_order(agent_id=agent_id)
+    rows = await storage.list_messages_with_order(agent_id=agent_id)
     if not rows:
         return CompactionResult(False, 0, 0, 0, 0, 0, 0, None)
 
@@ -209,7 +209,7 @@ def compact_conversation_if_needed(
         keep_recent_tokens=keep_recent_tokens,
         model=model,
     )
-    storage.upsert_memory(
+    await storage.upsert_memory(
         agent_id=agent_id,
         name=memory_name.strip(),
         summary=(
@@ -219,7 +219,7 @@ def compact_conversation_if_needed(
         strength=memory_strength,
         updated_at=now(),
     )
-    storage.delete_messages(agent_id=agent_id, message_ids=[row.id for row in compacted_rows])
+    await storage.delete_messages(agent_id=agent_id, message_ids=[row.id for row in compacted_rows])
 
     return CompactionResult(
         True,

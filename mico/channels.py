@@ -261,7 +261,7 @@ class TelegramChannelService:
             return
         self._running = True
 
-        rows = storage.list_enabled_agent_channels(channel='telegram')
+        rows = await storage.list_enabled_agent_channels(channel='telegram')
         for row in rows:
             cfg = _telegram_config_from_channel(row.config)
             if not cfg.bot_token:
