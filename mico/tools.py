@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from agno.run import RunContext
 from croniter import croniter
 
+from . import memory_store
 from . import storage
 from .messages import OutboundMessage
 from .utils import clamp, now, truncate
@@ -30,11 +31,10 @@ async def search_memories(run_context: RunContext, query: str, limit: int = 10) 
     Limit: 1-50 (default 10).
     """
     agent_id = run_context.session_state['agent_id']
-    rows = await storage.search_memories(agent_id=agent_id, query=query, limit=clamp(limit, 1, 50))
+    rows = await memory_store.search_memories(agent_id=agent_id, query=query, limit=clamp(limit, 1, 50))
     if not rows:
         return 'No matching memories found.'
 
-    await storage.touch_memories(agent_id=agent_id, memory_ids=[row.id for row in rows], accessed_at=now())
     lines = []
     for row in rows:
         lines.append(
@@ -69,13 +69,12 @@ async def create_memory(
         return 'Error: strength must be between 0 and 5.'
 
     agent_id = run_context.session_state['agent_id']
-    await storage.upsert_memory(
+    await memory_store.upsert_memory(
         agent_id=agent_id,
         name=name.strip(),
         summary=summary.strip(),
         content=content.strip(),
         strength=strength,
-        updated_at=now(),
     )
     return f"Memory '{name}' saved."
 
@@ -98,7 +97,7 @@ async def update_memory(
     Increase strength for memories that prove important; decrease for less relevant ones.
     """
     agent_id = run_context.session_state['agent_id']
-    row = await storage.find_memory(agent_id=agent_id, identifier=identifier)
+    row = await memory_store.find_memory(agent_id=agent_id, identifier=identifier)
     if row is None:
         return f"Memory '{identifier}' not found."
 
@@ -109,16 +108,17 @@ async def update_memory(
     if next_strength < 0 or next_strength > 5:
         return 'Error: strength must be between 0 and 5.'
 
-    await storage.update_memory(
-        agent_id=agent_id,
-        memory_id=row.id,
-        name=next_name,
-        summary=next_summary,
-        content=next_content,
-        strength=next_strength,
-        updated_at=now(),
-        metadata=row.metadata,
-    )
+    try:
+        await memory_store.update_memory(
+            agent_id=agent_id,
+            memory_id=row.id,
+            name=next_name,
+            summary=next_summary,
+            content=next_content,
+            strength=next_strength,
+        )
+    except ValueError as exc:
+        return f'Error: {exc}'
     return f"Memory '{row.name}' updated."
 
 
@@ -129,11 +129,11 @@ async def delete_memory(run_context: RunContext, identifier: str) -> str:
     Consider updating the memory instead if it just needs correction.
     """
     agent_id = run_context.session_state['agent_id']
-    row = await storage.find_memory(agent_id=agent_id, identifier=identifier)
+    row = await memory_store.find_memory(agent_id=agent_id, identifier=identifier)
     if row is None:
         return f"Memory '{identifier}' not found."
 
-    await storage.delete_memory(agent_id=agent_id, memory_id=row.id)
+    await memory_store.delete_memory(agent_id=agent_id, memory_id=row.id)
     return f"Memory '{row.name}' deleted."
 
 

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
+from . import memory_store
 from . import storage
 from .utils import now
 
@@ -209,7 +210,7 @@ async def compact_conversation_if_needed(
         keep_recent_tokens=keep_recent_tokens,
         model=model,
     )
-    await storage.upsert_memory(
+    await memory_store.upsert_memory(
         agent_id=agent_id,
         name=memory_name.strip(),
         summary=(
@@ -217,7 +218,6 @@ async def compact_conversation_if_needed(
         ).strip(),
         content=memory_content.strip(),
         strength=memory_strength,
-        updated_at=now(),
     )
     await storage.delete_messages(agent_id=agent_id, message_ids=[row.id for row in compacted_rows])
 

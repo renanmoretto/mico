@@ -27,7 +27,7 @@ Available tools vary by context: file ops, code execution, web access, messaging
 
 ## Memory & Context
 
-Before answering about prior work, decisions, people, preferences: search MEMORY.md, memory/*.md first. Pull only relevant lines. Say you checked if low confidence.
+Before answering about prior work, decisions, people, preferences: search MEMORY.md, memories/*.md first. Pull only relevant lines. Say you checked if low confidence.
 
 - Each session starts fresh. Context files are your continuity.
 - Read SOUL.md, MEMORY.md, README, config on startup.
