@@ -49,18 +49,6 @@ class MessageRecord:
 
 
 @dataclass(frozen=True)
-class MemoryRecord:
-    id: str
-    agent_id: str
-    name: str
-    summary: str
-    content: str
-    strength: int
-    updated_at: int
-    metadata: dict[str, Any]
-
-
-@dataclass(frozen=True)
 class ScheduledJobRecord:
     id: str
     agent_id: str
@@ -178,26 +166,7 @@ class SqliteStorage:
                         CHECK (role IN ('user', 'assistant', 'tool', 'system'))
                     );
 
-                    CREATE TABLE memories (
-                        id TEXT PRIMARY KEY,
-                        agent_id TEXT NOT NULL,
-                        name TEXT NOT NULL,
-                        created_at INTEGER NOT NULL,
-                        updated_at INTEGER NOT NULL,
-                        last_accessed INTEGER,
-                        access_count INTEGER NOT NULL DEFAULT 0,
-                        strength INTEGER NOT NULL,
-                        summary TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        meta_json TEXT NOT NULL DEFAULT '{}',
-                        FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
-                        CHECK (strength >= 0 AND strength <= 5),
-                        UNIQUE(agent_id, name)
-                    );
-
                     CREATE INDEX idx_messages_agent_ts ON messages(agent_id, timestamp);
-                    CREATE INDEX idx_memories_agent_updated ON memories(agent_id, updated_at);
-                    CREATE INDEX idx_memories_agent_strength ON memories(agent_id, strength);
                     CREATE INDEX idx_agent_channels_lookup ON agent_channels(agent_id, channel);
 
                     CREATE TABLE scheduled_jobs (
@@ -304,19 +273,6 @@ class SqliteStorage:
             status=str(row['status']),
             created_at=int(row['created_at']),
             updated_at=int(row['updated_at']),
-        )
-
-    @staticmethod
-    def _to_memory_record(row: sqlite3.Row) -> MemoryRecord:
-        return MemoryRecord(
-            id=str(row['id']),
-            agent_id=str(row['agent_id']),
-            name=str(row['name']),
-            summary=str(row['summary']),
-            content=str(row['content']),
-            strength=int(row['strength']),
-            updated_at=int(row['updated_at']),
-            metadata=SqliteStorage._decode_json(row['meta_json']),
         )
 
     async def _fetch_all(self, query: str, params: tuple = ()) -> list[sqlite3.Row]:
@@ -644,118 +600,6 @@ class SqliteStorage:
         await self._executemany(
             'DELETE FROM messages WHERE agent_id = ? AND id = ?',
             [(agent_id, message_id) for message_id in message_ids],
-        )
-
-    # Memories
-
-    async def upsert_memory(
-        self,
-        *,
-        agent_id: str,
-        name: str,
-        summary: str,
-        content: str,
-        strength: int,
-        updated_at: int,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        memory_id = str(uuid.uuid4())
-        await self._execute(
-            """
-            INSERT INTO memories (
-                id, agent_id, name, created_at, updated_at, last_accessed, access_count,
-                strength, summary, content, meta_json
-            )
-            VALUES (?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?)
-            ON CONFLICT(agent_id, name) DO UPDATE SET
-                summary = excluded.summary,
-                content = excluded.content,
-                strength = excluded.strength,
-                updated_at = excluded.updated_at,
-                meta_json = excluded.meta_json
-            """,
-            (
-                memory_id,
-                agent_id,
-                name,
-                updated_at,
-                updated_at,
-                strength,
-                summary,
-                content,
-                self._encode_json(metadata),
-            ),
-        )
-
-    async def find_memory(self, *, agent_id: str, identifier: str) -> MemoryRecord | None:
-        row = await self._fetch_one(
-            """
-            SELECT id, agent_id, name, summary, content, strength, updated_at, meta_json
-            FROM memories
-            WHERE agent_id = ? AND (id = ? OR name = ?)
-            LIMIT 1
-            """,
-            (agent_id, identifier, identifier),
-        )
-        return self._to_memory_record(row) if row is not None else None
-
-    async def update_memory(
-        self,
-        *,
-        agent_id: str,
-        memory_id: str,
-        name: str,
-        summary: str,
-        content: str,
-        strength: int,
-        updated_at: int,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        await self._execute(
-            """
-            UPDATE memories
-            SET name = ?, summary = ?, content = ?, strength = ?, updated_at = ?, meta_json = ?
-            WHERE agent_id = ? AND id = ?
-            """,
-            (
-                name,
-                summary,
-                content,
-                strength,
-                updated_at,
-                self._encode_json(metadata),
-                agent_id,
-                memory_id,
-            ),
-        )
-
-    async def delete_memory(self, *, agent_id: str, memory_id: str) -> None:
-        await self._execute('DELETE FROM memories WHERE agent_id = ? AND id = ?', (agent_id, memory_id))
-
-    async def search_memories(self, *, agent_id: str, query: str, limit: int) -> list[MemoryRecord]:
-        q = f'%{query.strip()}%'
-        rows = await self._fetch_all(
-            """
-            SELECT id, agent_id, name, strength, summary, content, updated_at, meta_json
-            FROM memories
-            WHERE agent_id = ? AND (name LIKE ? OR summary LIKE ? OR content LIKE ?)
-            ORDER BY strength DESC, updated_at DESC
-            LIMIT ?
-            """,
-            (agent_id, q, q, q, limit),
-        )
-        return [self._to_memory_record(row) for row in rows]
-
-    async def touch_memories(self, *, agent_id: str, memory_ids: list[str], accessed_at: int) -> None:
-        if not memory_ids:
-            return
-        await self._executemany(
-            """
-            UPDATE memories
-            SET last_accessed = ?, access_count = access_count + 1
-            WHERE agent_id = ? AND id = ?
-            """,
-            [(accessed_at, agent_id, memory_id) for memory_id in memory_ids],
         )
 
     # Scheduled jobs
