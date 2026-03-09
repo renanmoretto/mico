@@ -1,8 +1,11 @@
 from datetime import datetime, timezone
+import json
+from pathlib import PurePosixPath
 
 from agno.run import RunContext
 from croniter import croniter
 
+from . import agent_config
 from . import memory_store
 from . import storage
 from .messages import OutboundMessage
@@ -15,11 +18,20 @@ def _format_message_search_results(rows: list[storage.MessageRecord]) -> str:
 
     lines = []
     for row in rows:
+        content = row.content or ''
         lines.append(
             f'- id={row.id} | timestamp={row.timestamp} | role={row.role}\n'
-            f'  content={row.content}'
+            f'  content={content}'
         )
     return 'Messages:\n' + '\n'.join(lines)
+
+
+def _is_reserved_config_path(path: str) -> bool:
+    try:
+        normalized = str(PurePosixPath(path.strip() or '.'))
+    except Exception:
+        return False
+    return normalized == 'config.json'
 
 
 async def search_memories(run_context: RunContext, query: str, limit: int = 10) -> str:
@@ -167,56 +179,139 @@ async def run_shell(run_context: RunContext, command: str, timeout_seconds: int 
     return truncate(result)
 
 
-async def list_workspace_files(run_context: RunContext, path: str = '.', limit: int = 200) -> str:
-    """List files and directories in your workspace.
+async def get_config(run_context: RunContext) -> str:
+    """Read the full validated agent config as formatted JSON.
 
-    Path is relative to the workspace root (use '.' for root).
+    Use this before changing configuration. Preserve unrelated keys when you call
+    update_config. Do not edit config.json with generic file tools.
+    """
+    agent_id = run_context.session_state['agent_id']
+    payload = await agent_config.get_agent_config(agent_id, strict=True)
+    return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True)
+
+
+async def update_config(run_context: RunContext, config_json: str) -> str:
+    """Replace the full agent config with validated JSON.
+
+    Always call get_config first, modify the full object, and preserve unrelated keys.
+    If validation fails, nothing is saved.
+    """
+    agent_id = run_context.session_state['agent_id']
+    raw = config_json.strip()
+    if not raw:
+        return 'Error: config_json cannot be empty.'
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return f'Error: invalid JSON: {exc}'
+    try:
+        saved = await agent_config.set_agent_config(agent_id, parsed)
+    except ValueError as exc:
+        return f'Error: {exc}'
+    return 'Saved config:\n' + json.dumps(saved, indent=2, sort_keys=True, ensure_ascii=True)
+
+
+async def list_workspace_roots(run_context: RunContext) -> str:
+    """List the available file roots for this agent.
+
+    Use these names with the `root` argument on workspace file tools.
+    `workspace` is always available. Attached folder roots are human-managed.
+    """
+    agent_id = run_context.session_state['agent_id']
+    roots = await run_context.session_state['runtime'].list_root_names(agent_id)
+    lines = [f'- {root}{" (default)" if root == "workspace" else ""}' for root in roots]
+    return 'Roots:\n' + '\n'.join(lines)
+
+
+async def list_workspace_files(
+    run_context: RunContext,
+    path: str = '.',
+    limit: int = 200,
+    root: str = 'workspace',
+) -> str:
+    """List files and directories in a writable root.
+
+    Path is relative to the selected root. Use root='workspace' for the default
+    agent workspace, or an attached folder name for host-managed folders.
     Limit: 1-1000 entries (default 200).
     """
     if limit < 1 or limit > 1000:
         return 'Error: limit must be between 1 and 1000.'
-    items = await run_context.session_state['runtime'].list_files(agent_id=run_context.session_state['agent_id'], path=path)
+    items = await run_context.session_state['runtime'].list_files(
+        agent_id=run_context.session_state['agent_id'],
+        path=path,
+        root=root,
+    )
     if not items:
         return 'No files found.'
     return 'Files:\n' + '\n'.join(f'- {item}' for item in items[:limit])
 
 
-async def read_workspace_file(run_context: RunContext, path: str, max_chars: int = 20_000) -> str:
-    """Read a text file from your workspace.
+async def read_workspace_file(
+    run_context: RunContext,
+    path: str,
+    max_chars: int = 20_000,
+    root: str = 'workspace',
+) -> str:
+    """Read a text file from a writable root.
 
-    Path is relative to workspace root.
+    Path is relative to the selected root. Use root='workspace' for the default
+    agent workspace, or an attached folder name for host-managed folders.
     Output is truncated at max_chars (1-200000, default 20000).
     Use this to inspect file contents before modifying them.
     """
     if max_chars < 1 or max_chars > 200_000:
         return 'Error: max_chars must be between 1 and 200000.'
     try:
-        content = await run_context.session_state['runtime'].read_file(agent_id=run_context.session_state['agent_id'], path=path)
+        content = await run_context.session_state['runtime'].read_file(
+            agent_id=run_context.session_state['agent_id'],
+            path=path,
+            root=root,
+        )
     except Exception as exc:
         return f'Error: {exc}'
     return truncate(content, limit=max_chars)
 
 
-async def write_workspace_file(run_context: RunContext, path: str, content: str) -> str:
-    """Write or overwrite a text file in your workspace.
+async def write_workspace_file(
+    run_context: RunContext,
+    path: str,
+    content: str,
+    root: str = 'workspace',
+) -> str:
+    """Write or overwrite a text file in a writable root.
 
-    Path is relative to workspace root. Provide the full file content.
+    Path is relative to the selected root. Use root='workspace' for the default
+    agent workspace, or an attached folder name for host-managed folders.
     Creates the file if it doesn't exist, overwrites if it does.
     """
+    if root == 'workspace' and _is_reserved_config_path(path):
+        return 'Error: config.json is protected. Use get_config and update_config instead.'
     try:
-        written = await run_context.session_state['runtime'].write_file(agent_id=run_context.session_state['agent_id'], path=path, content=content)
+        written = await run_context.session_state['runtime'].write_file(
+            agent_id=run_context.session_state['agent_id'],
+            path=path,
+            content=content,
+            root=root,
+        )
     except Exception as exc:
         return f'Error: {exc}'
     return f'Wrote file: {written}'
 
 
-async def delete_workspace_path(run_context: RunContext, path: str) -> str:
-    """Delete a file or directory from your workspace.
+async def delete_workspace_path(run_context: RunContext, path: str, root: str = 'workspace') -> str:
+    """Delete a file or directory from a writable root.
 
-    Path is relative to workspace root. Directories are removed recursively.
+    Path is relative to the selected root. Directories are removed recursively.
     """
+    if root == 'workspace' and _is_reserved_config_path(path):
+        return 'Error: config.json is protected. Use update_config instead.'
     try:
-        deleted = await run_context.session_state['runtime'].delete_path(agent_id=run_context.session_state['agent_id'], path=path)
+        deleted = await run_context.session_state['runtime'].delete_path(
+            agent_id=run_context.session_state['agent_id'],
+            path=path,
+            root=root,
+        )
     except Exception as exc:
         return f'Error: {exc}'
     if not deleted:
@@ -327,7 +422,7 @@ async def send_message(
     """
     agent_id = run_context.session_state['agent_id']
 
-    channel_record = await storage.get_agent_channel(agent_id=agent_id, channel=channel)
+    channel_record = await agent_config.get_agent_channel(agent_id=agent_id, channel=channel)
     if channel_record is None or not channel_record.enabled:
         return f"Error: channel '{channel}' is not configured or not enabled for this agent."
 
@@ -339,7 +434,7 @@ async def send_message(
         if isinstance(allowed, list) and allowed:
             resolved_chat_id = str(allowed[0])
         elif channel == 'web':
-            resolved_chat_id = 'web-ui'
+            resolved_chat_id = str(cfg.get('default_chat_id') or 'web-ui')
 
     if not resolved_chat_id:
         return f"Error: no chat_id provided and could not resolve a default for channel '{channel}'."
@@ -365,6 +460,9 @@ TOOLS = [
     delete_memory,
     search_messages,
     run_shell,
+    get_config,
+    update_config,
+    list_workspace_roots,
     list_workspace_files,
     read_workspace_file,
     write_workspace_file,
