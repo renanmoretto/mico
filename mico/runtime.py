@@ -9,8 +9,11 @@ from pathlib import Path
 
 from . import storage
 from .config import CONFIG
+from .utils import slugify
 
 logger = logging.getLogger(__name__)
+_ATTACHED_FOLDERS_KEY = 'attached_folders'
+_WORKSPACE_ROOT = 'workspace'
 
 
 @dataclass(frozen=True)
@@ -18,6 +21,12 @@ class RuntimeInfo:
     mode: str  # docker | local
     workspace: Path
     container_name: str | None = None
+
+
+@dataclass(frozen=True)
+class AttachedFolder:
+    name: str
+    path: str
 
 
 class RuntimeManager:
@@ -42,6 +51,75 @@ class RuntimeManager:
 
     def workspace_path(self, agent_id: str) -> Path:
         return self._base_dir / agent_id / 'workspace'
+
+    async def list_attached_folders(self, agent_id: str) -> list[AttachedFolder]:
+        row = await storage.get_agent(agent_id)
+        if row is None:
+            raise ValueError(f"Agent '{agent_id}' not found.")
+        return self._attached_folders_from_metadata(row.metadata)
+
+    async def list_root_names(self, agent_id: str) -> list[str]:
+        return [_WORKSPACE_ROOT, *[folder.name for folder in await self.list_attached_folders(agent_id)]]
+
+    async def attach_folder(self, *, agent_id: str, path: str, name: str | None = None) -> AttachedFolder:
+        row = await storage.get_agent(agent_id)
+        if row is None:
+            raise ValueError(f"Agent '{agent_id}' not found.")
+
+        current = self._attached_folders_from_metadata(row.metadata)
+        folder = self._validate_attached_folder(path=path, name=name, existing=current)
+        metadata = dict(row.metadata)
+        metadata[_ATTACHED_FOLDERS_KEY] = self._attached_folders_payload([*current, folder])
+        await storage.update_agent(
+            agent_id=agent_id,
+            metadata=metadata,
+            updated_at=int(time.time()),
+        )
+        return folder
+
+    async def detach_folder(self, *, agent_id: str, name: str) -> bool:
+        row = await storage.get_agent(agent_id)
+        if row is None:
+            raise ValueError(f"Agent '{agent_id}' not found.")
+
+        folder_name = self._normalize_root_name(name)
+        current = self._attached_folders_from_metadata(row.metadata)
+        updated = [folder for folder in current if folder.name != folder_name]
+        if len(updated) == len(current):
+            return False
+
+        metadata = dict(row.metadata)
+        if updated:
+            metadata[_ATTACHED_FOLDERS_KEY] = self._attached_folders_payload(updated)
+        else:
+            metadata.pop(_ATTACHED_FOLDERS_KEY, None)
+        await storage.update_agent(
+            agent_id=agent_id,
+            metadata=metadata,
+            updated_at=int(time.time()),
+        )
+        return True
+
+    async def root_path(self, *, agent_id: str, root: str = _WORKSPACE_ROOT) -> Path:
+        root_name = self._normalize_root_name(root) or _WORKSPACE_ROOT
+        if root_name == _WORKSPACE_ROOT:
+            workspace = self.workspace_path(agent_id)
+            await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
+            return workspace
+
+        for folder in await self.list_attached_folders(agent_id):
+            if folder.name != root_name:
+                continue
+            target = Path(folder.path)
+            try:
+                resolved = target.resolve(strict=True)
+            except FileNotFoundError as exc:
+                raise ValueError(f"Attached folder '{root_name}' is missing: {folder.path}") from exc
+            if not resolved.is_dir():
+                raise ValueError(f"Attached folder '{root_name}' is not a directory: {folder.path}")
+            return resolved
+
+        raise ValueError(f"Root '{root_name}' not found.")
 
     def container_name(self, agent_id: str) -> str:
         safe = ''.join(ch for ch in agent_id if ch.isalnum() or ch in {'-', '_'})
@@ -164,54 +242,57 @@ class RuntimeManager:
             )
         return output or '(no output)'
 
-    async def list_files(self, *, agent_id: str, path: str = '.') -> list[str]:
-        workspace = self.workspace_path(agent_id)
-        await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
-        target = self._resolve_workspace_path(workspace, path)
-        workspace_resolved = workspace.resolve()
+    async def list_files(self, *, agent_id: str, path: str = '.', root: str = _WORKSPACE_ROOT) -> list[str]:
+        base = await self.root_path(agent_id=agent_id, root=root)
+        target = self._resolve_root_path(base, path)
+        base_resolved = base.resolve()
 
         def _list() -> list[str]:
             if not target.exists():
                 return []
             if target.is_file():
-                return [str(target.relative_to(workspace_resolved))]
+                return [str(target.relative_to(base_resolved))]
             items: list[str] = []
             for child in sorted(target.iterdir(), key=lambda p: p.name):
-                rel = child.relative_to(workspace_resolved)
+                rel = child.relative_to(base_resolved)
                 suffix = '/' if child.is_dir() else ''
                 items.append(f'{rel}{suffix}')
             return items
 
         return await asyncio.to_thread(_list)
 
-    async def read_file(self, *, agent_id: str, path: str) -> str:
-        workspace = self.workspace_path(agent_id)
-        await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
-        target = self._resolve_workspace_path(workspace, path)
+    async def read_file(self, *, agent_id: str, path: str, root: str = _WORKSPACE_ROOT) -> str:
+        base = await self.root_path(agent_id=agent_id, root=root)
+        target = self._resolve_root_path(base, path)
 
         def _read() -> str:
             if not target.exists() or not target.is_file():
-                raise ValueError(f"File '{path}' not found in agent workspace.")
+                raise ValueError(f"File '{path}' not found in root '{self._normalize_root_name(root) or _WORKSPACE_ROOT}'.")
             return target.read_text(encoding='utf-8')
 
         return await asyncio.to_thread(_read)
 
-    async def write_file(self, *, agent_id: str, path: str, content: str) -> str:
-        workspace = self.workspace_path(agent_id)
-        await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
-        target = self._resolve_workspace_path(workspace, path)
+    async def write_file(
+        self,
+        *,
+        agent_id: str,
+        path: str,
+        content: str,
+        root: str = _WORKSPACE_ROOT,
+    ) -> str:
+        base = await self.root_path(agent_id=agent_id, root=root)
+        target = self._resolve_root_path(base, path)
 
         def _write() -> str:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding='utf-8')
-            return str(target.relative_to(workspace.resolve()))
+            return str(target.relative_to(base.resolve()))
 
         return await asyncio.to_thread(_write)
 
-    async def delete_path(self, *, agent_id: str, path: str) -> bool:
-        workspace = self.workspace_path(agent_id)
-        await asyncio.to_thread(workspace.mkdir, parents=True, exist_ok=True)
-        target = self._resolve_workspace_path(workspace, path)
+    async def delete_path(self, *, agent_id: str, path: str, root: str = _WORKSPACE_ROOT) -> bool:
+        base = await self.root_path(agent_id=agent_id, root=root)
+        target = self._resolve_root_path(base, path)
 
         def _delete() -> bool:
             if not target.exists():
@@ -342,13 +423,78 @@ class RuntimeManager:
 
         return RuntimeManager._ProcessResult(returncode=returncode, stdout=stdout, stderr=stderr)
 
+    def _validate_attached_folder(
+        self,
+        *,
+        path: str,
+        name: str | None,
+        existing: list[AttachedFolder],
+    ) -> AttachedFolder:
+        raw_path = str(path or '').strip()
+        if not raw_path:
+            raise ValueError('Folder path is required.')
+
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            raise ValueError('Folder path must be absolute.')
+
+        try:
+            resolved = candidate.resolve(strict=True)
+        except FileNotFoundError as exc:
+            raise ValueError(f"Folder '{raw_path}' does not exist.") from exc
+        if not resolved.is_dir():
+            raise ValueError(f"Folder '{raw_path}' is not a directory.")
+
+        folder_name = self._normalize_requested_root_name(name=name, path=resolved)
+        if folder_name == _WORKSPACE_ROOT:
+            raise ValueError("'workspace' is reserved.")
+        if any(folder.name == folder_name for folder in existing):
+            raise ValueError(f"Root '{folder_name}' already exists.")
+
+        base_dir = self._base_dir.resolve()
+        if resolved == base_dir or base_dir in resolved.parents:
+            raise ValueError('Cannot attach folders inside the managed runtime directory.')
+
+        return AttachedFolder(name=folder_name, path=str(resolved))
+
     @staticmethod
-    def _resolve_workspace_path(workspace: Path, raw_path: str) -> Path:
-        target = (workspace / raw_path).resolve()
-        workspace_resolved = workspace.resolve()
-        if workspace_resolved == target or workspace_resolved in target.parents:
+    def _normalize_root_name(value: str | None) -> str:
+        raw = str(value or '').strip()
+        return slugify(raw) if raw else ''
+
+    def _normalize_requested_root_name(self, *, name: str | None, path: Path) -> str:
+        raw_name = str(name or '').strip()
+        if raw_name:
+            return self._normalize_root_name(raw_name)
+        return self._normalize_root_name(path.name or 'folder')
+
+    @classmethod
+    def _attached_folders_from_metadata(cls, metadata: dict[str, object] | None) -> list[AttachedFolder]:
+        payload = metadata.get(_ATTACHED_FOLDERS_KEY) if isinstance(metadata, dict) else None
+        if not isinstance(payload, list):
+            return []
+
+        folders: list[AttachedFolder] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            name = cls._normalize_root_name(item.get('name'))
+            path = str(item.get('path') or '').strip()
+            if name and path:
+                folders.append(AttachedFolder(name=name, path=path))
+        return sorted(folders, key=lambda folder: folder.name)
+
+    @staticmethod
+    def _attached_folders_payload(folders: list[AttachedFolder]) -> list[dict[str, str]]:
+        return [{'name': folder.name, 'path': folder.path} for folder in folders]
+
+    @staticmethod
+    def _resolve_root_path(base: Path, raw_path: str) -> Path:
+        target = (base / raw_path).resolve()
+        base_resolved = base.resolve()
+        if base_resolved == target or base_resolved in target.parents:
             return target
-        raise ValueError(f"Path '{raw_path}' escapes the agent workspace.")
+        raise ValueError(f"Path '{raw_path}' escapes the selected root.")
 
 
 _RUNTIME_MANAGER: RuntimeManager | None = None
