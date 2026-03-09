@@ -51,7 +51,7 @@ def test_web_config_saves_json(tmp_path, monkeypatch) -> None:
             '/config',
             data={
                 'config_json': (
-                    '{"model":{"openrouter_model":"openai/gpt-4o-mini"},'
+                    '{"llm":{"provider":"openrouter","model":"openai/gpt-4o-mini"},'
                     '"runtime":{"docker_enabled":false}}'
                 )
             },

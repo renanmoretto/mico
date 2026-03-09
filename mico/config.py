@@ -104,8 +104,9 @@ def _as_dict(value: Any) -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
-class ModelDefaults:
-    openrouter_model: str = _env_str('MICO_MODEL', 'minimax/minimax-m2.5')
+class LLMConfig:
+    provider: str = 'openrouter'
+    model: str = _env_str('MICO_MODEL', 'minimax/minimax-m2.5')
 
 
 @dataclass(frozen=True)
@@ -137,7 +138,7 @@ class WebDefaults:
 
 @dataclass(frozen=True)
 class AppConfig:
-    model: ModelDefaults = field(default_factory=ModelDefaults)
+    llm: LLMConfig = field(default_factory=LLMConfig)
     telegram: TelegramDefaults = field(default_factory=TelegramDefaults)
     runtime: RuntimeDefaults = field(default_factory=RuntimeDefaults)
     web: WebDefaults = field(default_factory=WebDefaults)
@@ -145,15 +146,16 @@ class AppConfig:
 
 _APP_CONFIG_KEY = 'app'
 _MODEL_CACHE_LOCK = asyncio.Lock()
-_MODEL_CACHE: tuple[str, OpenRouter] | None = None
+_MODEL_CACHE: dict[tuple[str, str], OpenRouter] = {}
 _DEFAULT_CONFIG = AppConfig()
 
 
 def _default_payload() -> dict[str, Any]:
     cfg = _DEFAULT_CONFIG
     return {
-        'model': {
-            'openrouter_model': cfg.model.openrouter_model,
+        'llm': {
+            'provider': cfg.llm.provider,
+            'model': cfg.llm.model,
         },
         'telegram': {
             'enabled': cfg.telegram.enabled,
@@ -183,20 +185,17 @@ async def _load_raw_payload() -> dict[str, Any]:
         await storage.upsert_config(key=_APP_CONFIG_KEY, config=defaults)
         return copy.deepcopy(defaults)
 
-    return _deep_merge(defaults, _as_dict(current))
+    return _normalize_app_payload(_deep_merge(defaults, _as_dict(current)))
 
 
 def _parse_app_config(raw: dict[str, Any]) -> AppConfig:
     D = _DEFAULT_CONFIG
-    m = _as_dict(raw.get('model'))
+    llm = _parse_llm_config(raw.get('llm'), fallback=D.llm)
     t = _as_dict(raw.get('telegram'))
     r = _as_dict(raw.get('runtime'))
     w = _as_dict(raw.get('web'))
     return AppConfig(
-        model=ModelDefaults(
-            openrouter_model=str(m.get('openrouter_model') or D.model.openrouter_model).strip()
-            or D.model.openrouter_model,
-        ),
+        llm=llm,
         telegram=TelegramDefaults(
             enabled=_coerce_bool(t.get('enabled', D.telegram.enabled), D.telegram.enabled),
             poll_timeout_seconds=max(5, _coerce_int(t.get('poll_timeout_seconds'), D.telegram.poll_timeout_seconds)),
@@ -232,11 +231,11 @@ async def get_app_config_payload() -> dict[str, Any]:
 async def set_app_config(config: dict[str, Any]) -> AppConfig:
     if not storage.is_initialized():
         raise RuntimeError('Storage is not initialized. Call init_storage() before setting app config.')
-    payload = _deep_merge(_default_payload(), _as_dict(config))
+    payload = _normalize_app_payload(config)
     await storage.upsert_config(key=_APP_CONFIG_KEY, config=payload)
     async with _MODEL_CACHE_LOCK:
         global _MODEL_CACHE
-        _MODEL_CACHE = None
+        _MODEL_CACHE = {}
     return _parse_app_config(payload)
 
 
@@ -246,21 +245,70 @@ async def update_app_config(patch: dict[str, Any]) -> AppConfig:
     return await set_app_config(next_payload)
 
 
-async def get_model() -> OpenRouter:
-    model_name = (await get_app_config()).model.openrouter_model
+def _parse_llm_config(raw: Any, *, fallback: LLMConfig) -> LLMConfig:
+    source = _as_dict(raw)
+    provider = str(source.get('provider') or fallback.provider).strip().lower() or fallback.provider
+    model = str(source.get('model') or fallback.model).strip() or fallback.model
+    if provider != 'openrouter':
+        raise ValueError(f"Unsupported LLM provider '{provider}'.")
+    return LLMConfig(provider=provider, model=model)
+
+
+def _normalize_app_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    D = _DEFAULT_CONFIG
+    merged = _deep_merge(_default_payload(), _as_dict(raw))
+    t = _as_dict(merged.get('telegram'))
+    r = _as_dict(merged.get('runtime'))
+    w = _as_dict(merged.get('web'))
+    llm = _parse_llm_config(_as_dict(raw).get('llm'), fallback=D.llm)
+    return {
+        'llm': {
+            'provider': llm.provider,
+            'model': llm.model,
+        },
+        'telegram': {
+            'enabled': _coerce_bool(t.get('enabled', D.telegram.enabled), D.telegram.enabled),
+            'poll_timeout_seconds': max(5, _coerce_int(t.get('poll_timeout_seconds'), D.telegram.poll_timeout_seconds)),
+            'poll_interval_seconds': max(
+                0.05, _coerce_float(t.get('poll_interval_seconds'), D.telegram.poll_interval_seconds)
+            ),
+            'drop_pending_updates': _coerce_bool(
+                t.get('drop_pending_updates', D.telegram.drop_pending_updates), D.telegram.drop_pending_updates
+            ),
+        },
+        'runtime': {
+            'base_dir': str(r.get('base_dir') or D.runtime.base_dir).strip() or D.runtime.base_dir,
+            'docker_enabled': _coerce_bool(r.get('docker_enabled', D.runtime.docker_enabled), D.runtime.docker_enabled),
+            'docker_image': str(r.get('docker_image') or D.runtime.docker_image).strip() or D.runtime.docker_image,
+            'idle_stop_seconds': max(30, _coerce_int(r.get('idle_stop_seconds'), D.runtime.idle_stop_seconds)),
+        },
+        'web': {
+            'telegram_autostart': _coerce_bool(
+                w.get('telegram_autostart', D.web.telegram_autostart), D.web.telegram_autostart
+            ),
+        },
+    }
+
+
+async def get_model(llm: LLMConfig | None = None) -> OpenRouter:
+    resolved = llm or (await get_app_config()).llm
+    cache_key = (resolved.provider, resolved.model)
     async with _MODEL_CACHE_LOCK:
         global _MODEL_CACHE
-        if _MODEL_CACHE is not None and _MODEL_CACHE[0] == model_name:
-            return _MODEL_CACHE[1]
-        model = OpenRouter(model_name)
-        _MODEL_CACHE = (model_name, model)
+        cached = _MODEL_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        if resolved.provider != 'openrouter':
+            raise ValueError(f"Unsupported LLM provider '{resolved.provider}'.")
+        model = OpenRouter(resolved.model)
+        _MODEL_CACHE[cache_key] = model
         return model
 
 
 class _ConfigProxy:
     @property
-    def model(self) -> ModelDefaults:
-        return _DEFAULT_CONFIG.model
+    def llm(self) -> LLMConfig:
+        return _DEFAULT_CONFIG.llm
 
     @property
     def telegram(self) -> TelegramDefaults:
