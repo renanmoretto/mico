@@ -51,8 +51,15 @@ def count_tokens(text: str, model: str = DEFAULT_TOKEN_MODEL) -> int:
     return len(encoder.encode(text))
 
 
-def message_tokens(role: str, content: str, model: str = DEFAULT_TOKEN_MODEL) -> int:
-    return 4 + count_tokens(role, model=model) + count_tokens(content, model=model)
+def message_tokens(row: storage.MessageRecord, model: str = DEFAULT_TOKEN_MODEL) -> int:
+    total = 4 + count_tokens(str(row.role), model=model)
+    if row.content:
+        total += count_tokens(row.content, model=model)
+    if row.tool_call_id:
+        total += count_tokens(row.tool_call_id, model=model)
+    if row.tool_calls:
+        total += count_tokens(json.dumps(row.tool_calls, ensure_ascii=True, separators=(',', ':')), model=model)
+    return total
 
 
 async def select_recent_messages_for_context(
@@ -68,7 +75,7 @@ async def select_recent_messages_for_context(
     selected: list[storage.MessageRecord] = []
     total = 0
     for row in reversed(rows):
-        tokens = message_tokens(str(row.role), str(row.content or ''), model=model)
+        tokens = message_tokens(row, model=model)
         if selected and total + tokens > token_budget:
             break
         selected.append(row)
@@ -135,6 +142,8 @@ def _build_compaction_memory_payload(
                 'timestamp': row.timestamp,
                 'role': row.role,
                 'content': row.content,
+                'tool_call_id': row.tool_call_id,
+                'tool_calls': row.tool_calls,
             }
             for row in compacted_rows
         ],
@@ -160,7 +169,7 @@ async def compact_conversation_if_needed(
     if not rows:
         return CompactionResult(False, 0, 0, 0, 0, 0, 0, None)
 
-    token_counts = [message_tokens(str(row.role), str(row.content or ''), model=model) for row in rows]
+    token_counts = [message_tokens(row, model=model) for row in rows]
     total_before = sum(token_counts)
     if total_before < threshold_tokens:
         tail_start, tail_tokens = _find_recent_tail_start(token_counts, keep_recent_tokens=keep_recent_tokens)

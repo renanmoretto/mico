@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from . import storage
+from . import agent_config
 from .bus import MessageBus
 from .config import CONFIG
 from .messages import InboundMessage, OutboundMessage, register_sender, unregister_sender
@@ -261,7 +261,7 @@ class TelegramChannelService:
             return
         self._running = True
 
-        rows = await storage.list_enabled_agent_channels(channel='telegram')
+        rows = await agent_config.list_enabled_agent_channels(channel='telegram')
         for row in rows:
             cfg = _telegram_config_from_channel(row.config)
             if not cfg.bot_token:
@@ -307,7 +307,7 @@ class TelegramChannelService:
         if adapter is None:
             raise ValueError(
                 f'Telegram adapter not configured for agent {message.agent_id}. '
-                'Configure agent_channels telegram bot_token first.'
+                'Configure workspace config.json telegram bot_token first.'
             )
         await adapter.send(message)
 

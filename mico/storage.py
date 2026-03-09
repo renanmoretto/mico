@@ -10,7 +10,7 @@ from typing import Any, Literal
 import aiosqlite
 
 MessageRole = Literal['user', 'assistant', 'tool', 'system']
-SCHEMA_VERSION = '5'
+SCHEMA_VERSION = '8'
 
 _storage_instance: 'SqliteStorage | None' = None
 
@@ -27,23 +27,14 @@ class AgentRecord:
 
 
 @dataclass(frozen=True)
-class AgentChannelRecord:
-    id: str
-    agent_id: str
-    channel: str
-    enabled: bool
-    config: dict[str, Any]
-    created_at: int
-    updated_at: int
-
-
-@dataclass(frozen=True)
 class MessageRecord:
     id: str
     agent_id: str
     timestamp: int
     role: str
-    content: str
+    content: str | None
+    tool_call_id: str | None
+    tool_calls: list[dict[str, Any]] | None
     metadata: dict[str, Any]
     insert_order: int | None = None
 
@@ -115,7 +106,7 @@ class SqliteStorage:
             current = str(row['value']) if row is not None else None
 
             if current != SCHEMA_VERSION:
-                # No backward compatibility required: rebuild to keep schema simple.
+                # Schema changes rebuild the local DB to keep storage simple.
                 await self._conn.executescript(
                     """
                     DROP TABLE IF EXISTS scheduled_jobs;
@@ -136,18 +127,6 @@ class SqliteStorage:
                         CHECK (status IN ('active', 'paused', 'deleted'))
                     );
 
-                    CREATE TABLE agent_channels (
-                        id TEXT PRIMARY KEY,
-                        agent_id TEXT NOT NULL,
-                        channel TEXT NOT NULL,
-                        enabled INTEGER NOT NULL DEFAULT 1,
-                        config_json TEXT NOT NULL DEFAULT '{}',
-                        created_at INTEGER NOT NULL,
-                        updated_at INTEGER NOT NULL,
-                        FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
-                        UNIQUE(agent_id, channel)
-                    );
-
                     CREATE TABLE config (
                         key TEXT PRIMARY KEY,
                         config_json TEXT NOT NULL DEFAULT '{}',
@@ -160,14 +139,15 @@ class SqliteStorage:
                         agent_id TEXT NOT NULL,
                         timestamp INTEGER NOT NULL,
                         role TEXT NOT NULL,
-                        content TEXT NOT NULL,
+                        content TEXT,
+                        tool_call_id TEXT,
+                        tool_calls_json TEXT,
                         meta_json TEXT NOT NULL DEFAULT '{}',
                         FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
                         CHECK (role IN ('user', 'assistant', 'tool', 'system'))
                     );
 
                     CREATE INDEX idx_messages_agent_ts ON messages(agent_id, timestamp);
-                    CREATE INDEX idx_agent_channels_lookup ON agent_channels(agent_id, channel);
 
                     CREATE TABLE scheduled_jobs (
                         id TEXT PRIMARY KEY,
@@ -211,6 +191,12 @@ class SqliteStorage:
         return json.dumps(value or {}, ensure_ascii=True, separators=(',', ':'))
 
     @staticmethod
+    def _encode_json_value(value: Any) -> str | None:
+        if value is None:
+            return None
+        return json.dumps(value, ensure_ascii=True, separators=(',', ':'))
+
+    @staticmethod
     def _decode_json(value: Any) -> dict[str, Any]:
         if value is None:
             return {}
@@ -222,6 +208,21 @@ class SqliteStorage:
         except json.JSONDecodeError:
             return {}
         return parsed if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _decode_json_list(value: Any) -> list[dict[str, Any]] | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, list):
+            return None
+        return [item for item in parsed if isinstance(item, dict)] or None
 
     @staticmethod
     def _to_agent_record(row: sqlite3.Row) -> AgentRecord:
@@ -236,25 +237,15 @@ class SqliteStorage:
         )
 
     @staticmethod
-    def _to_agent_channel_record(row: sqlite3.Row) -> AgentChannelRecord:
-        return AgentChannelRecord(
-            id=str(row['id']),
-            agent_id=str(row['agent_id']),
-            channel=str(row['channel']),
-            enabled=bool(int(row['enabled'])),
-            config=SqliteStorage._decode_json(row['config_json']),
-            created_at=int(row['created_at']),
-            updated_at=int(row['updated_at']),
-        )
-
-    @staticmethod
     def _to_message_record(row: sqlite3.Row) -> MessageRecord:
         return MessageRecord(
             id=str(row['id']),
             agent_id=str(row['agent_id']),
             timestamp=int(row['timestamp']),
             role=str(row['role']),
-            content=str(row['content']),
+            content=str(row['content']) if row['content'] is not None else None,
+            tool_call_id=str(row['tool_call_id']) if row['tool_call_id'] is not None else None,
+            tool_calls=SqliteStorage._decode_json_list(row['tool_calls_json']),
             metadata=SqliteStorage._decode_json(row['meta_json']),
             insert_order=int(row['insert_order']) if 'insert_order' in row.keys() else None,
         )
@@ -368,15 +359,15 @@ class SqliteStorage:
         )
         return self._to_agent_record(row) if row is not None else None
 
-    async def find_agent(self, identifier: str) -> AgentRecord | None:
+    async def get_agent_by_name(self, name: str) -> AgentRecord | None:
         row = await self._fetch_one(
             """
             SELECT id, name, status, runtime_json, meta_json, created_at, updated_at
             FROM agents
-            WHERE id = ? OR name = ?
+            WHERE name = ?
             LIMIT 1
             """,
-            (identifier, identifier),
+            (name,),
         )
         return self._to_agent_record(row) if row is not None else None
 
@@ -433,63 +424,6 @@ class SqliteStorage:
             await self._conn.commit()
             return cursor.rowcount > 0
 
-    # Agent channels
-
-    async def upsert_agent_channel(
-        self,
-        *,
-        agent_id: str,
-        channel: str,
-        enabled: bool,
-        updated_at: int,
-        config: dict[str, Any] | None = None,
-    ) -> str:
-        new_id = str(uuid.uuid4())
-        await self._execute(
-            """
-            INSERT INTO agent_channels (id, agent_id, channel, enabled, config_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(agent_id, channel) DO UPDATE SET
-                enabled = excluded.enabled,
-                config_json = excluded.config_json,
-                updated_at = excluded.updated_at
-            """,
-            (new_id, agent_id, channel, 1 if enabled else 0, self._encode_json(config), updated_at, updated_at),
-        )
-        row = await self._fetch_one('SELECT id FROM agent_channels WHERE agent_id = ? AND channel = ?', (agent_id, channel))
-        return str(row['id'])
-
-    async def get_agent_channel(self, *, agent_id: str, channel: str) -> AgentChannelRecord | None:
-        row = await self._fetch_one(
-            """
-            SELECT id, agent_id, channel, enabled, config_json, created_at, updated_at
-            FROM agent_channels
-            WHERE agent_id = ? AND channel = ?
-            LIMIT 1
-            """,
-            (agent_id, channel),
-        )
-        return self._to_agent_channel_record(row) if row is not None else None
-
-    async def list_agent_channels(self, *, agent_id: str, enabled_only: bool = False) -> list[AgentChannelRecord]:
-        extra = ' AND enabled = 1' if enabled_only else ''
-        rows = await self._fetch_all(
-            f'SELECT id, agent_id, channel, enabled, config_json, created_at, updated_at '
-            f'FROM agent_channels WHERE agent_id = ?{extra} ORDER BY channel ASC',
-            (agent_id,),
-        )
-        return [self._to_agent_channel_record(row) for row in rows]
-
-    async def list_enabled_agent_channels(self, channel: str | None = None) -> list[AgentChannelRecord]:
-        extra = ' AND channel = ?' if channel is not None else ''
-        params = (channel,) if channel is not None else ()
-        rows = await self._fetch_all(
-            f'SELECT id, agent_id, channel, enabled, config_json, created_at, updated_at '
-            f'FROM agent_channels WHERE enabled = 1{extra} ORDER BY agent_id ASC',
-            params,
-        )
-        return [self._to_agent_channel_record(row) for row in rows]
-
     # App config
 
     async def get_config(self, *, key: str = 'app') -> dict[str, Any] | None:
@@ -526,24 +460,44 @@ class SqliteStorage:
         *,
         agent_id: str,
         role: MessageRole,
-        content: str,
+        content: str | None,
         timestamp: int,
+        tool_call_id: str | None = None,
+        tool_calls: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> str:
         message_id = str(uuid.uuid4())
         await self._execute(
             """
-            INSERT INTO messages (id, agent_id, timestamp, role, content, meta_json)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO messages (
+                id,
+                agent_id,
+                timestamp,
+                role,
+                content,
+                tool_call_id,
+                tool_calls_json,
+                meta_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (message_id, agent_id, timestamp, role, content, self._encode_json(metadata)),
+            (
+                message_id,
+                agent_id,
+                timestamp,
+                role,
+                content,
+                tool_call_id,
+                self._encode_json_value(tool_calls),
+                self._encode_json(metadata),
+            ),
         )
         return message_id
 
     async def list_messages(self, *, agent_id: str) -> list[MessageRecord]:
         rows = await self._fetch_all(
             """
-            SELECT id, agent_id, timestamp, role, content, meta_json
+            SELECT id, agent_id, timestamp, role, content, tool_call_id, tool_calls_json, meta_json
             FROM messages
             WHERE agent_id = ?
             ORDER BY timestamp ASC, rowid ASC
@@ -555,9 +509,9 @@ class SqliteStorage:
     async def list_recent_messages(self, *, agent_id: str, limit: int) -> list[MessageRecord]:
         rows = await self._fetch_all(
             """
-            SELECT id, agent_id, timestamp, role, content, meta_json
+            SELECT id, agent_id, timestamp, role, content, tool_call_id, tool_calls_json, meta_json
             FROM (
-                SELECT rowid AS insert_order, id, agent_id, timestamp, role, content, meta_json
+                SELECT rowid AS insert_order, id, agent_id, timestamp, role, content, tool_call_id, tool_calls_json, meta_json
                 FROM messages
                 WHERE agent_id = ?
                 ORDER BY timestamp DESC, insert_order DESC
@@ -572,7 +526,7 @@ class SqliteStorage:
     async def list_messages_with_order(self, *, agent_id: str) -> list[MessageRecord]:
         rows = await self._fetch_all(
             """
-            SELECT rowid AS insert_order, id, agent_id, timestamp, role, content, meta_json
+            SELECT rowid AS insert_order, id, agent_id, timestamp, role, content, tool_call_id, tool_calls_json, meta_json
             FROM messages
             WHERE agent_id = ?
             ORDER BY timestamp ASC, insert_order ASC
@@ -584,13 +538,24 @@ class SqliteStorage:
     async def search_messages(self, *, agent_id: str, query: str, limit: int) -> list[MessageRecord]:
         rows = await self._fetch_all(
             """
-            SELECT id, agent_id, timestamp, role, content, meta_json
+            SELECT id, agent_id, timestamp, role, content, tool_call_id, tool_calls_json, meta_json
             FROM messages
-            WHERE agent_id = ? AND content LIKE ?
+            WHERE agent_id = ?
+              AND (
+                COALESCE(content, '') LIKE ?
+                OR COALESCE(tool_call_id, '') LIKE ?
+                OR COALESCE(tool_calls_json, '') LIKE ?
+              )
             ORDER BY timestamp DESC, rowid DESC
             LIMIT ?
             """,
-            (agent_id, f'%{query.strip()}%', limit),
+            (
+                agent_id,
+                f'%{query.strip()}%',
+                f'%{query.strip()}%',
+                f'%{query.strip()}%',
+                limit,
+            ),
         )
         return [self._to_message_record(row) for row in rows]
 
