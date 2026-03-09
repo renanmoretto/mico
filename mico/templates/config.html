@@ -34,8 +34,8 @@
 
 <div class="config-info">
   <div class="config-info-cell">
-    <div class="config-info-label">Model</div>
-    <div class="config-info-val">{{ model_name }}</div>
+    <div class="config-info-label">LLM</div>
+    <div class="config-info-val">{{ llm_provider }} / {{ llm_model }}</div>
   </div>
   <div class="config-info-cell">
     <div class="config-info-label">Telegram Defaults</div>
@@ -57,8 +57,8 @@
       <div class="f">
         <textarea name="config_json" style="min-height:480px;resize:vertical" spellcheck="false" required>{{ config_json }}</textarea>
         <p style="font-size:9px;color:var(--border);margin-top:8px;letter-spacing:1px">
-          Channel credentials and per-agent channel settings remain in
-          <span style="color:var(--ink-3)">agent_channels</span>.
+          Per-agent settings live in each agent workspace
+          <span style="color:var(--ink-3)">config.json</span>.
         </p>
       </div>
       <button type="submit" class="btn-do" style="width:100%;display:block">save</button>

@@ -4,17 +4,20 @@ import asyncio
 import json
 import logging
 import os
+import shutil
+import subprocess
+import sys
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
-from . import agents, storage
+from . import agent_config, agents, storage
 from . import paths
-from .agent import Mico
+from .agent import Mico, subscribe_events, unsubscribe_events
 from .bus import AgentMessageWorker, MessageBus, OutboundMessageWorker
 from .channels import ChannelManager
 from . import config as app_config
@@ -182,7 +185,7 @@ def _redirect_with_query(
 
 
 async def _require_agent(identifier: str) -> storage.AgentRecord:
-    row = await storage.find_agent(identifier)
+    row = await storage.get_agent(identifier)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Agent '{identifier}' not found")
     return row
@@ -214,6 +217,107 @@ def _parent_path(path: str) -> str:
     return str(parent)
 
 
+def _normalize_root(raw: str | None) -> str:
+    value = str(raw or 'workspace').strip()
+    return value or 'workspace'
+
+
+def _resolve_folder_picker_output(raw: str) -> str | None:
+    value = str(raw or '').strip()
+    if not value:
+        return None
+    return str(Path(value).expanduser().resolve())
+
+
+def _pick_folder_macos() -> str | None:
+    result = subprocess.run(
+        ['osascript', '-e', 'POSIX path of (choose folder with prompt "Select a folder to attach")'],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        if '(-128)' in detail:
+            return None
+        raise RuntimeError(detail or 'macOS folder picker failed.')
+    return _resolve_folder_picker_output(result.stdout)
+
+
+def _pick_folder_windows() -> str | None:
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog; "
+        "$dialog.Description = 'Select a folder to attach'; "
+        "$dialog.ShowNewFolderButton = $false; "
+        "if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { "
+        "Write-Output $dialog.SelectedPath }"
+    )
+    result = subprocess.run(
+        ['powershell', '-NoProfile', '-Command', script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(detail or 'Windows folder picker failed.')
+    return _resolve_folder_picker_output(result.stdout)
+
+
+def _pick_folder_linux() -> str | None:
+    for command in (
+        ['zenity', '--file-selection', '--directory', '--title=Select a folder to attach'],
+        ['kdialog', '--getexistingdirectory', os.path.expanduser('~'), '--title', 'Select a folder to attach'],
+    ):
+        executable = command[0]
+        if shutil.which(executable) is None:
+            continue
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode == 0:
+            return _resolve_folder_picker_output(result.stdout)
+        if result.returncode in {1, 130}:
+            return None
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(detail or f'{executable} folder picker failed.')
+    raise RuntimeError('No supported folder picker is available on this Linux machine.')
+
+
+def _pick_folder_tk() -> str | None:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception as exc:
+        raise RuntimeError('Folder picker is unavailable. Enter the path manually.') from exc
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes('-topmost', True)
+    except Exception:
+        pass
+    try:
+        selected = filedialog.askdirectory(mustexist=True, title='Select a folder to attach')
+    finally:
+        root.destroy()
+    return _resolve_folder_picker_output(selected)
+
+
+def _pick_folder_sync() -> str | None:
+    if sys.platform == 'darwin':
+        return _pick_folder_macos()
+    if sys.platform.startswith('win'):
+        return _pick_folder_windows()
+    try:
+        return _pick_folder_linux()
+    except RuntimeError:
+        return _pick_folder_tk()
+
+
+async def _pick_folder() -> str | None:
+    return await asyncio.to_thread(_pick_folder_sync)
+
+
 @app.get('/', response_class=HTMLResponse)
 async def home() -> RedirectResponse:
     return RedirectResponse('/agents', status_code=302)
@@ -223,9 +327,9 @@ async def home() -> RedirectResponse:
 async def agents_page(request: Request) -> HTMLResponse:
     await _ensure_storage()
     rows = await agents.list_agents()
-    channel_map: dict[str, list[storage.AgentChannelRecord]] = {}
+    channel_map: dict[str, list[agent_config.AgentChannel]] = {}
     for row in rows:
-        channel_map[row.id] = await storage.list_agent_channels(agent_id=row.id)
+        channel_map[row.id] = await agent_config.list_agent_channels(agent_id=row.id)
 
     return templates.TemplateResponse(
         request=request,
@@ -249,7 +353,8 @@ async def config_page(request: Request) -> HTMLResponse:
         name='config.html',
         context={
             'config_json': json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True),
-            'model_name': typed.model.openrouter_model,
+            'llm_provider': typed.llm.provider,
+            'llm_model': typed.llm.model,
             'telegram_defaults': {
                 'enabled': typed.telegram.enabled,
                 'poll_timeout_seconds': typed.telegram.poll_timeout_seconds,
@@ -311,9 +416,12 @@ async def create_agent(
 async def agent_detail(request: Request, identifier: str) -> HTMLResponse:
     await _ensure_storage()
     row = await _require_agent(identifier)
-    channels = await storage.list_agent_channels(agent_id=row.id)
-    telegram = await storage.get_agent_channel(agent_id=row.id, channel='telegram')
+    channels = await agent_config.list_agent_channels(agent_id=row.id)
+    telegram = await agent_config.get_agent_channel(agent_id=row.id, channel='telegram')
     recent_messages = await storage.list_recent_messages(agent_id=row.id, limit=30)
+
+    agent_cfg = await agent_config.get_agent_config(row.id)
+    agent_config_json = json.dumps(agent_cfg, indent=2, sort_keys=True, ensure_ascii=True)
 
     telegram_config = telegram.config if telegram is not None else {}
     allow_ids = telegram_config.get('allowed_chat_ids')
@@ -322,6 +430,25 @@ async def agent_detail(request: Request, identifier: str) -> HTMLResponse:
         allow_text = '\n'.join(str(item) for item in allow_ids)
 
     manager = get_runtime_manager()
+    attached_folders = await manager.list_attached_folders(row.id)
+    workspace_root = _normalize_root(request.query_params.get('root'))
+    workspace_roots = [
+        {
+            'name': 'workspace',
+            'label': 'workspace',
+            'path': str(manager.workspace_path(row.id).resolve()),
+            'attached': False,
+        },
+        *[
+            {
+                'name': folder.name,
+                'label': folder.name,
+                'path': folder.path,
+                'attached': True,
+            }
+            for folder in attached_folders
+        ],
+    ]
     workspace_items: list[dict[str, object]] = []
     workspace_error: str | None = None
     file_content: str = ''
@@ -331,15 +458,18 @@ async def agent_detail(request: Request, identifier: str) -> HTMLResponse:
     selected_file = request.query_params.get('file')
 
     try:
-        listed = await manager.list_files(agent_id=row.id, path=browse_path)
+        listed = await manager.list_files(agent_id=row.id, path=browse_path, root=workspace_root)
         for item in listed:
             is_dir = item.endswith('/')
             pure = item[:-1] if is_dir else item
             display_name = pure.rsplit('/', 1)[-1]
             if is_dir:
-                href = f'/agents/{row.id}?' + urlencode({'tab': 'workspace', 'path': pure})
+                href = f'/agents/{row.id}?' + urlencode({'tab': 'workspace', 'root': workspace_root, 'path': pure})
             else:
-                href = f'/agents/{row.id}?' + urlencode({'tab': 'workspace', 'path': browse_path, 'file': pure})
+                href = (
+                    f'/agents/{row.id}?'
+                    + urlencode({'tab': 'workspace', 'root': workspace_root, 'path': browse_path, 'file': pure})
+                )
             workspace_items.append(
                 {
                     'path': pure,
@@ -353,7 +483,7 @@ async def agent_detail(request: Request, identifier: str) -> HTMLResponse:
 
     if selected_file:
         try:
-            file_content = await manager.read_file(agent_id=row.id, path=selected_file)
+            file_content = await manager.read_file(agent_id=row.id, path=selected_file, root=workspace_root)
             file_content = _truncate(file_content, limit=60_000)
         except Exception as exc:
             file_error = str(exc)
@@ -365,11 +495,16 @@ async def agent_detail(request: Request, identifier: str) -> HTMLResponse:
             'agent': row,
             'channels': channels,
             'telegram': telegram,
+            'telegram_enabled': bool(telegram.enabled) if telegram is not None else False,
+            'telegram_has_token': bool(str(telegram_config.get('bot_token') or '').strip()),
             'telegram_bot_token': str(telegram_config.get('bot_token') or ''),
             'telegram_allowed_chat_ids': allow_text,
+            'attached_folders': attached_folders,
             'recent_messages': recent_messages,
             'ok': request.query_params.get('ok'),
             'error': request.query_params.get('error'),
+            'workspace_root': workspace_root,
+            'workspace_roots': workspace_roots,
             'workspace_path': browse_path,
             'workspace_parent_path': _parent_path(browse_path),
             'workspace_items': workspace_items,
@@ -377,6 +512,7 @@ async def agent_detail(request: Request, identifier: str) -> HTMLResponse:
             'selected_file': selected_file,
             'selected_file_content': file_content,
             'selected_file_error': file_error,
+            'agent_config_json': agent_config_json,
         },
     )
 
@@ -418,6 +554,74 @@ async def update_telegram(
         return _redirect(f'/agents/{row.id}', error=f'Telegram settings saved, but reload failed: {exc}')
     state = 'enabled' if is_enabled else 'disabled'
     return _redirect(f'/agents/{row.id}', ok=f'Telegram {state}.')
+
+
+@app.post('/agents/{identifier}/folders/attach')
+async def attach_folder(
+    identifier: str,
+    path: str = Form(''),
+    name: str = Form(''),
+) -> RedirectResponse:
+    await _ensure_storage()
+    row = await _require_agent(identifier)
+    manager = get_runtime_manager()
+    try:
+        folder = await manager.attach_folder(agent_id=row.id, path=path, name=name or None)
+    except Exception as exc:
+        return _redirect_with_query(f'/agents/{row.id}', query={'tab': 'workspace'}, error=str(exc))
+    return _redirect_with_query(
+        f'/agents/{row.id}',
+        query={'tab': 'workspace', 'root': folder.name, 'path': '.'},
+        ok=f"Attached folder '{folder.name}'.",
+    )
+
+
+@app.post('/agents/{identifier}/folders/detach')
+async def detach_folder(
+    identifier: str,
+    name: str = Form(...),
+) -> RedirectResponse:
+    await _ensure_storage()
+    row = await _require_agent(identifier)
+    manager = get_runtime_manager()
+    try:
+        detached = await manager.detach_folder(agent_id=row.id, name=name)
+    except Exception as exc:
+        return _redirect_with_query(f'/agents/{row.id}', query={'tab': 'workspace'}, error=str(exc))
+    if not detached:
+        return _redirect_with_query(f'/agents/{row.id}', query={'tab': 'workspace'}, error=f"Folder '{name}' not found.")
+    return _redirect_with_query(f'/agents/{row.id}', query={'tab': 'workspace'}, ok=f"Detached folder '{name}'.")
+
+
+@app.post('/agents/{identifier}/config')
+async def update_agent_config(
+    identifier: str,
+    config_json: str = Form(...),
+) -> RedirectResponse:
+    await _ensure_storage()
+    row = await _require_agent(identifier)
+    raw = config_json.strip()
+    if not raw:
+        return _redirect_with_query(f'/agents/{row.id}', query={'tab': 'config'}, error='Config JSON cannot be empty.')
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return _redirect_with_query(f'/agents/{row.id}', query={'tab': 'config'}, error=f'Invalid JSON: {exc}')
+    if not isinstance(parsed, dict):
+        return _redirect_with_query(f'/agents/{row.id}', query={'tab': 'config'}, error='Config must be a JSON object.')
+
+    try:
+        await agent_config.set_agent_config(row.id, parsed)
+    except Exception as exc:
+        return _redirect_with_query(f'/agents/{row.id}', query={'tab': 'config'}, error=f'Failed to save: {exc}')
+
+    try:
+        await _reload_telegram_service()
+    except Exception as exc:
+        return _redirect_with_query(f'/agents/{row.id}', query={'tab': 'config'}, error=f'Saved, but Telegram reload failed: {exc}')
+
+    return _redirect_with_query(f'/agents/{row.id}', query={'tab': 'config'}, ok='Config saved.')
 
 
 @app.post('/agents/{identifier}/prompt')
@@ -510,17 +714,22 @@ async def api_chat_agent(request: Request, identifier: str) -> JSONResponse:
     return JSONResponse(
         {
             'success': True,
-            'messages': [
-                {
-                    'id': m.id,
-                    'role': m.role,
-                    'content': m.content,
-                    'timestamp': m.timestamp,
-                }
-                for m in messages
-            ],
+            'messages': [_message_to_dict(m) for m in messages],
         }
     )
+
+
+def _message_to_dict(m: storage.MessageRecord) -> dict:
+    d: dict = {'id': m.id, 'role': m.role, 'timestamp': m.timestamp}
+    if m.content is not None:
+        d['content'] = m.content
+    if m.tool_call_id is not None:
+        d['tool_call_id'] = m.tool_call_id
+    if m.tool_calls is not None:
+        d['tool_calls'] = m.tool_calls
+    if m.metadata:
+        d['metadata'] = m.metadata
+    return d
 
 
 @app.get('/api/agents/{identifier}/messages')
@@ -531,16 +740,47 @@ async def api_get_messages(identifier: str, since: int = 0, limit: int = 50) -> 
     filtered = [m for m in messages if m.timestamp > since]
     return JSONResponse(
         {
-            'messages': [
-                {
-                    'id': m.id,
-                    'role': m.role,
-                    'content': m.content,
-                    'timestamp': m.timestamp,
-                }
-                for m in filtered
-            ],
+            'messages': [_message_to_dict(m) for m in filtered],
         }
+    )
+
+
+@app.post('/api/folders/pick')
+async def api_pick_folder() -> JSONResponse:
+    try:
+        selected = await _pick_folder()
+    except Exception as exc:
+        return JSONResponse({'error': str(exc)}, status_code=500)
+    if not selected:
+        return JSONResponse({'cancelled': True})
+    return JSONResponse({'path': selected})
+
+
+@app.get('/api/agents/{identifier}/events')
+async def agent_events(identifier: str) -> StreamingResponse:
+    await _ensure_storage()
+    row = await _require_agent(identifier)
+    q = subscribe_events(row.id)
+
+    async def event_stream():
+        import time as _time
+        deadline = _time.time() + 300
+        try:
+            while _time.time() < deadline:
+                try:
+                    event = await asyncio.wait_for(q.get(), timeout=30)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+        finally:
+            unsubscribe_events(row.id, q)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
     )
 
 
@@ -548,11 +788,15 @@ async def api_get_messages(identifier: str, since: int = 0, limit: int = 50) -> 
 async def workspace_open(
     identifier: str,
     path: str = Form('.'),
+    root: str = Form('workspace'),
 ) -> RedirectResponse:
     await _ensure_storage()
     row = await _require_agent(identifier)
     browse = _normalize_browse_path(path)
-    return _redirect_with_query(f'/agents/{row.id}', query={'tab': 'workspace', 'path': browse})
+    return _redirect_with_query(
+        f'/agents/{row.id}',
+        query={'tab': 'workspace', 'root': _normalize_root(root), 'path': browse},
+    )
 
 
 @app.post('/agents/{identifier}/delete')

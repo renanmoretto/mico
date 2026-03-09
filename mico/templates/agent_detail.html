@@ -244,6 +244,29 @@ body > main {
 
 .hidden { display: none !important; }
 
+/* ── ACTIVITY LOG (tool call streaming) ── */
+.activity-log {
+  max-width: 70%;
+  padding: 8px 12px;
+  border: 1px dashed var(--border-dim);
+  border-left: 3px dashed var(--accent);
+  background: var(--bg);
+  margin-bottom: 10px;
+  animation: bubbleIn 0.2s ease-out;
+}
+.activity-item {
+  font-size: 10px;
+  font-family: 'Geist Mono', monospace;
+  padding: 2px 0;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.activity-item.running { color: var(--accent); }
+.activity-item.done { color: var(--border); }
+.activity-item.error { color: #c0392b; }
+
 .chat-status {
   font-size: 11px;
   color: var(--ink-3);
@@ -322,6 +345,188 @@ body > main {
   overflow: auto;
   min-height: 0;
   font-size: 11px;
+}
+
+/* ── WORKSPACE ROOTS ── */
+.roots-section {
+  margin-bottom: 12px;
+  flex-shrink: 0;
+}
+
+.roots-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.roots-label {
+  font-size: 9px;
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: 2px;
+}
+
+.roots-count {
+  font-size: 8px;
+  color: var(--border);
+  letter-spacing: 0.5px;
+}
+
+.roots-list {
+  border: 1px solid var(--border-dim);
+  background: var(--bg);
+}
+
+.root-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border-dim);
+  text-decoration: none;
+  color: var(--ink-3);
+  font-size: 11px;
+  transition: all 0.12s;
+  gap: 8px;
+}
+
+.root-item:last-child { border-bottom: none; }
+.root-item:hover { background: var(--accent-ghost); color: var(--ink); }
+
+.root-item.is-active {
+  border-left: 2px solid var(--accent);
+  color: var(--accent);
+  background: var(--accent-ghost);
+}
+
+.root-item-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.root-item-icon {
+  font-size: 9px;
+  color: var(--border);
+  flex-shrink: 0;
+}
+
+.root-item-name {
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  white-space: nowrap;
+}
+
+.root-item-tag {
+  font-size: 7px;
+  color: var(--border);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  border: 1px solid var(--border-dim);
+  padding: 1px 5px;
+  flex-shrink: 0;
+}
+
+.root-remove-btn {
+  background: none;
+  border: none;
+  color: var(--border);
+  font-family: inherit;
+  font-size: 9px;
+  cursor: pointer;
+  padding: 2px 6px;
+  transition: color 0.15s;
+  letter-spacing: 0.5px;
+}
+
+.root-remove-btn:hover { color: #c0392b; }
+
+.attach-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 12px;
+  background: transparent;
+  border: 1px dashed var(--border-dim);
+  border-top: none;
+  color: var(--ink-3);
+  font-family: inherit;
+  font-size: 9px;
+  cursor: pointer;
+  transition: all 0.15s;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.attach-trigger:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-ghost);
+}
+
+.attach-form {
+  border: 1px solid var(--accent);
+  border-top: none;
+  background: var(--surface);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.attach-form-row {
+  display: flex;
+  gap: 6px;
+}
+
+.attach-form .ch-form-input {
+  font-size: 11px;
+  padding: 7px 10px;
+}
+
+.attach-form-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.attach-form-feedback {
+  font-size: 9px;
+  color: var(--ink-3);
+  letter-spacing: 0.3px;
+}
+
+.attach-form-feedback.is-error { color: #c0392b; }
+
+.picker-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--ink);
+  padding: 7px 10px;
+  font-family: 'Geist Mono', monospace;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.picker-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.picker-btn:disabled {
+  opacity: 0.45;
+  cursor: wait;
 }
 
 /* ── CHANNELS REDESIGN ── */
@@ -588,7 +793,7 @@ function switchTab(tabId) {
 }
 document.addEventListener('DOMContentLoaded', function() {
   var params = new URLSearchParams(window.location.search);
-  var tab = params.get('tab') || 'overview';
+  var tab = params.get('tab') || 'chat';
   if (document.getElementById(tab)) switchTab(tab);
 });
 
@@ -626,78 +831,15 @@ function toggleTokenVis() {
 
   <!-- Tab nav -->
   <div class="tabs-bar">
-    <button class="tab-btn active" data-tab="overview" onclick="switchTab('overview')">overview</button>
-    <button class="tab-btn" data-tab="chat" onclick="switchTab('chat')">chat</button>
+    <button class="tab-btn active" data-tab="chat" onclick="switchTab('chat')">chat</button>
     <button class="tab-btn" data-tab="workspace" onclick="switchTab('workspace')">workspace</button>
     <button class="tab-btn" data-tab="channels" onclick="switchTab('channels')">channels</button>
+    <button class="tab-btn" data-tab="config" onclick="switchTab('config')">config</button>
     <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">settings</button>
   </div>
 
-  <!-- ── OVERVIEW ── -->
-  <div id="overview" class="tab-content active">
-    <div class="card-grid card-grid-2" style="flex:1;overflow:auto;padding-bottom:16px;align-content:start">
-      <div class="card">
-        <div class="card-title">channels</div>
-        <div class="ch-item">
-          <span class="ch-name">web</span>
-          <span class="ch-status-on" style="font-size:9px;letter-spacing:1px">default</span>
-        </div>
-        {% for ch in channels[:5] %}
-        <div class="ch-item">
-          <span class="ch-name">{{ ch.channel }}</span>
-          {% if ch.enabled %}
-            <span class="ch-status-on">● active</span>
-          {% else %}
-            <span class="ch-status-off">○ off</span>
-          {% endif %}
-        </div>
-        {% endfor %}
-        {% if not channels %}
-        <a href="?tab=channels" onclick="switchTab('channels'); return false;"
-           style="font-size:9px;color:var(--ink-3);text-decoration:none;display:block;margin-top:10px;letter-spacing:1px">
-          configure integrations ›
-        </a>
-        {% elif channels | length > 5 %}
-        <a href="?tab=channels" onclick="switchTab('channels'); return false;"
-           style="font-size:9px;color:var(--ink-3);text-decoration:none;display:block;margin-top:10px;letter-spacing:2px">
-          +{{ channels|length - 5 }} more ›
-        </a>
-        {% endif %}
-      </div>
-
-      <div style="display:flex;flex-direction:column;gap:14px">
-        <div class="card">
-          <div class="card-title">stats</div>
-          <div class="stat-row">
-            <span class="label">Status</span>
-            <span class="value">
-              {% if agent.status == 'active' %}<span class="s-on">active</span>
-              {% elif agent.status == 'idle' %}<span class="s-idle">idle</span>
-              {% else %}<span class="s-off">offline</span>{% endif %}
-            </span>
-          </div>
-          <div class="stat-row">
-            <span class="label">Channels</span>
-            <span class="value">{{ channels | length + 1 }}</span>
-          </div>
-          <div class="stat-row">
-            <span class="label">Created</span>
-            <span class="value">{{ agent.created_at }}</span>
-          </div>
-        </div>
-        <div class="card">
-          <div class="card-title">actions</div>
-          <a href="?tab=chat" onclick="switchTab('chat'); return false;"
-             class="btn" style="display:block;text-align:center;margin-bottom:8px">open chat</a>
-          <a href="?tab=settings" onclick="switchTab('settings'); return false;"
-             class="btn btn-dim" style="display:block;text-align:center">settings</a>
-        </div>
-      </div>
-    </div>
-  </div>
-
   <!-- ── CHAT ── -->
-  <div id="chat" class="tab-content">
+  <div id="chat" class="tab-content active">
     <div class="chat-container">
       <div class="chat-messages" id="chat-messages">
         <div id="chat-empty" class="chat-empty" style="{% if recent_messages %}display:none{% endif %}">
@@ -706,11 +848,19 @@ function toggleTokenVis() {
         </div>
         {% if recent_messages %}
           {% for msg in recent_messages %}
-          <div class="chat-bubble {{ msg.role }}" data-ts="{{ msg.timestamp }}">
-            <div class="role-label">{{ msg.role }}</div>
-            <div class="content">{{ msg.content }}</div>
-            <div class="timestamp">{{ msg.timestamp }}</div>
-          </div>
+            {% set meta = msg.metadata if msg.metadata is defined else {} %}
+            {% if msg.role == 'assistant' and msg.tool_calls and not msg.content %}
+            {% elif msg.role == 'tool' %}
+            <div class="activity-log" data-ts="{{ msg.timestamp }}">
+              <div class="activity-item {% if meta.get('tool_call_error') %}error{% else %}done{% endif %}">{{ meta.get('tool_name', 'tool') }}{% if meta.get('tool_call_error') %} (error){% endif %}</div>
+            </div>
+            {% else %}
+            <div class="chat-bubble {{ msg.role }}" data-ts="{{ msg.timestamp }}">
+              <div class="role-label">{{ msg.role }}</div>
+              <div class="content">{{ msg.content }}</div>
+              <div class="timestamp">{{ msg.timestamp }}</div>
+            </div>
+            {% endif %}
           {% endfor %}
         {% endif %}
       </div>
@@ -737,9 +887,64 @@ function toggleTokenVis() {
       <div class="card workspace-panel">
         <div class="card-title">files</div>
 
+        <div class="roots-section">
+          <div class="roots-header">
+            <span class="roots-label">roots</span>
+            <span class="roots-count">{{ attached_folders | length }} attached</span>
+          </div>
+
+          <div class="roots-list">
+            {% for root in workspace_roots %}
+            <div class="root-item {% if root.name == workspace_root %}is-active{% endif %}"
+                 title="{{ root.path }}" style="cursor:pointer"
+                 onclick="window.location.href='/agents/{{ agent.id }}?tab=workspace&root={{ root.name }}&path=.'">
+              <div class="root-item-info">
+                <span class="root-item-icon">{% if root.attached %}+{% else %}~{% endif %}</span>
+                <span class="root-item-name">{{ root.label }}</span>
+                {% if not root.attached %}
+                <span class="root-item-tag">primary</span>
+                {% endif %}
+              </div>
+              {% if root.attached %}
+              <form method="post" action="/agents/{{ agent.id }}/folders/detach"
+                    onclick="event.stopPropagation();"
+                    onsubmit="event.stopPropagation(); return confirm('Remove access to \'{{ root.name }}\'? This does not delete the folder.')">
+                <input type="hidden" name="name" value="{{ root.name }}" />
+                <button type="submit" class="root-remove-btn">remove</button>
+              </form>
+              {% endif %}
+            </div>
+            {% endfor %}
+          </div>
+
+          <button type="button" class="attach-trigger" id="attach-toggle-btn" onclick="toggleAttachComposer()">
+            + attach folder
+          </button>
+
+          <form method="post" action="/agents/{{ agent.id }}/folders/attach"
+                id="attach-composer" class="attach-form hidden">
+            <div class="attach-form-row">
+              <input type="text" id="attach-path-input" name="path" class="ch-form-input"
+                     placeholder="/absolute/path" required style="flex:1" />
+              <button type="button" class="picker-btn" id="pick-folder-btn" onclick="pickFolder()">browse</button>
+            </div>
+            <div class="attach-form-row">
+              <input type="text" id="attach-name-input" name="name" class="ch-form-input"
+                     placeholder="root name (optional)" style="flex:1" />
+              <button type="submit" class="btn-save" style="font-size:9px;padding:7px 14px;letter-spacing:1.5px">attach</button>
+            </div>
+            <div class="attach-form-footer">
+              <span id="attach-feedback" class="attach-form-feedback"></span>
+              <button type="button" class="root-remove-btn" onclick="toggleAttachComposer(false)">cancel</button>
+            </div>
+          </form>
+        </div>
+
         <!-- Breadcrumb navigation -->
         <div class="workspace-breadcrumb">
-          <a href="/agents/{{ agent.id }}?tab=workspace&path=.">~</a>
+          <a href="/agents/{{ agent.id }}?tab=workspace&root={{ workspace_root }}&path=.">
+            {% if workspace_root == 'workspace' %}~{% else %}{{ workspace_root }}{% endif %}
+          </a>
           {% if workspace_path != '.' %}
             {% set ns = namespace(crumb='') %}
             {% for part in workspace_path.split('/') %}
@@ -749,7 +954,7 @@ function toggleTokenVis() {
                 {% set ns.crumb = part %}
               {% endif %}
               <span class="sep">/</span>
-              <a href="/agents/{{ agent.id }}?tab=workspace&path={{ ns.crumb }}">{{ part }}</a>
+              <a href="/agents/{{ agent.id }}?tab=workspace&root={{ workspace_root }}&path={{ ns.crumb }}">{{ part }}</a>
             {% endfor %}
           {% endif %}
         </div>
@@ -760,14 +965,14 @@ function toggleTokenVis() {
 
         <div class="file-browser">
           {% if workspace_path != '.' %}
-            <a href="/agents/{{ agent.id }}?tab=workspace&path={{ workspace_parent_path }}" class="file-item is-parent">
+            <a href="/agents/{{ agent.id }}?tab=workspace&root={{ workspace_root }}&path={{ workspace_parent_path }}" class="file-item is-parent">
               <span class="file-sym">..</span>
               <span>parent directory</span>
             </a>
           {% endif %}
           {% if workspace_items %}
             {% for item in workspace_items %}
-            <a href="{{ item.href }}" class="file-item {% if item.is_dir %}is-dir{% endif %} {% if not item.is_dir and selected_file and item.display == selected_file %}is-selected{% endif %}">
+            <a href="{{ item.href }}" class="file-item {% if item.is_dir %}is-dir{% endif %} {% if not item.is_dir and selected_file and item.path == selected_file %}is-selected{% endif %}">
               <span class="file-sym">{% if item.is_dir %}[d]{% else %}[-]{% endif %}</span>
               <span>{{ item.display }}</span>
             </a>
@@ -817,9 +1022,9 @@ function toggleTokenVis() {
             </div>
           </div>
           <div>
-            {% if telegram and telegram.enabled %}
+            {% if telegram_enabled %}
               <span class="ch-badge ch-badge-on">● active</span>
-            {% elif telegram and telegram.bot_token %}
+            {% elif telegram_has_token %}
               <span class="ch-badge ch-badge-off">○ configured</span>
             {% else %}
               <span class="ch-badge ch-badge-none">— not set up</span>
@@ -837,7 +1042,7 @@ function toggleTokenVis() {
                 <div class="form-hint" style="margin-bottom:0">Receive and respond to messages via Telegram</div>
               </div>
               <label class="toggle-switch">
-                <input type="checkbox" name="enabled" {% if telegram and telegram.enabled %}checked{% endif %} />
+                <input type="checkbox" name="enabled" {% if telegram_enabled %}checked{% endif %} />
                 <span class="toggle-slider"></span>
               </label>
             </div>
@@ -919,6 +1124,31 @@ function toggleTokenVis() {
     </div>
   </div>
 
+  <!-- ── CONFIG ── -->
+  <div id="config" class="tab-content">
+    <div style="max-width:660px;flex:1;overflow:auto;padding-bottom:24px">
+      <div class="table-frame" style="border:1px solid var(--border)">
+        <div style="background:var(--sysbar);border-bottom:1px solid var(--border);padding:10px 18px;display:flex;align-items:center;justify-content:space-between">
+          <span style="font-size:9px;color:var(--ink-3);text-transform:uppercase;letter-spacing:4px">config.json</span>
+          <span style="font-size:9px;color:var(--border);letter-spacing:2px">workspace/config.json</span>
+        </div>
+        <div style="padding:22px">
+          <form method="post" action="/agents/{{ agent.id }}/config">
+            <div class="f">
+              <textarea name="config_json" style="min-height:400px;resize:vertical;width:100%;background:var(--bg);border:1px solid var(--border);color:var(--ink);font-family:'Geist Mono',monospace;font-size:12px;padding:12px;outline:none;box-sizing:border-box" spellcheck="false" required>{{ agent_config_json }}</textarea>
+              <p style="font-size:9px;color:var(--border);margin-top:8px;letter-spacing:1px">
+                Agent-level config. Overrides global settings for this agent.
+              </p>
+            </div>
+            <div class="form-actions">
+              <button type="submit" class="btn-save">save</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- ── SETTINGS ── -->
   <div id="settings" class="tab-content">
     <div class="card-grid card-grid-2" style="flex:1;overflow:auto;padding-bottom:16px;align-content:start">
@@ -975,8 +1205,15 @@ function toggleTokenVis() {
   var sendIcon = document.getElementById('chat-send-icon');
   var spinnerEl = document.getElementById('chat-spinner');
   var statusEl = document.getElementById('chat-status');
+  var attachComposerEl = document.getElementById('attach-composer');
+  var attachToggleBtn = document.getElementById('attach-toggle-btn');
+  var attachPathInput = document.getElementById('attach-path-input');
+  var attachNameInput = document.getElementById('attach-name-input');
+  var attachFeedbackEl = document.getElementById('attach-feedback');
+  var pickFolderBtn = document.getElementById('pick-folder-btn');
   var isLoading = false;
   var lastTimestamp = 0;
+  var eventSource = null;
 
   function scrollToEnd() { messagesEl.scrollTop = messagesEl.scrollHeight; }
 
@@ -996,13 +1233,22 @@ function toggleTokenVis() {
 
   function addMessage(msg) {
     emptyEl.style.display = 'none';
+    var meta = msg.metadata || {};
+    if (msg.role === 'assistant' && msg.tool_calls && !msg.content) return null;
     var div = document.createElement('div');
-    div.className = 'chat-bubble ' + msg.role;
+    if (msg.role === 'tool') {
+      div.className = 'activity-log';
+      var toolName = meta.tool_name || 'tool';
+      var cls = meta.tool_call_error ? 'error' : 'done';
+      div.innerHTML = '<div class="activity-item ' + cls + '">' + escapeHtml(toolName) + (meta.tool_call_error ? ' (error)' : '') + '</div>';
+    } else {
+      div.className = 'chat-bubble ' + msg.role;
+      div.innerHTML =
+        '<div class="role-label">' + msg.role + '</div>' +
+        '<div class="content">' + escapeHtml(msg.content) + '</div>' +
+        '<div class="timestamp">' + formatTime(msg.timestamp) + '</div>';
+    }
     div.setAttribute('data-ts', msg.timestamp);
-    div.innerHTML =
-      '<div class="role-label">' + msg.role + '</div>' +
-      '<div class="content">' + escapeHtml(msg.content) + '</div>' +
-      '<div class="timestamp">' + formatTime(msg.timestamp) + '</div>';
     messagesEl.appendChild(div);
     if (msg.timestamp > lastTimestamp) lastTimestamp = msg.timestamp;
     scrollToEnd();
@@ -1037,6 +1283,111 @@ function toggleTokenVis() {
     statusEl.classList.toggle('error', !!isError);
   }
 
+  function setAttachFeedback(text, isError) {
+    if (!attachFeedbackEl) return;
+    attachFeedbackEl.textContent = text || '';
+    attachFeedbackEl.classList.toggle('is-error', !!isError);
+  }
+
+  function suggestRootName(path) {
+    var cleaned = (path || '').replace(/[\\/]+$/, '');
+    var tail = cleaned.split(/[\\/]/).pop() || 'folder';
+    var slug = tail.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+    return slug || 'folder';
+  }
+
+  function toggleAttachComposer(forceOpen) {
+    if (!attachComposerEl) return;
+    var shouldOpen = typeof forceOpen === 'boolean' ? forceOpen : attachComposerEl.classList.contains('hidden');
+    attachComposerEl.classList.toggle('hidden', !shouldOpen);
+    if (attachToggleBtn) attachToggleBtn.classList.toggle('hidden', shouldOpen);
+    if (shouldOpen && attachPathInput) attachPathInput.focus();
+  }
+
+  async function pickFolder() {
+    if (!pickFolderBtn) return;
+    toggleAttachComposer(true);
+    pickFolderBtn.disabled = true;
+    pickFolderBtn.textContent = 'opening...';
+    setAttachFeedback('Opening the local folder picker…', false);
+    try {
+      var resp = await fetch('/api/folders/pick', {method: 'POST'});
+      var data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Folder picker failed');
+      if (data.cancelled) {
+        setAttachFeedback('Folder selection cancelled.', false);
+        return;
+      }
+      if (attachPathInput) attachPathInput.value = data.path || '';
+      if (attachNameInput && !attachNameInput.value.trim()) attachNameInput.value = suggestRootName(data.path || '');
+      setAttachFeedback('Folder selected. Review the root name, then attach it.', false);
+    } catch (err) {
+      setAttachFeedback((err && err.message) || 'Folder picker is unavailable. Enter the path manually.', true);
+    } finally {
+      pickFolderBtn.disabled = false;
+      pickFolderBtn.textContent = 'browse';
+    }
+  }
+
+  window.toggleAttachComposer = toggleAttachComposer;
+  window.pickFolder = pickFolder;
+
+  function showActivityLog() {
+    if (document.getElementById('activity-log')) return;
+    var div = document.createElement('div');
+    div.id = 'activity-log';
+    div.className = 'activity-log';
+    messagesEl.appendChild(div);
+    scrollToEnd();
+  }
+
+  function hideActivityLog() {
+    var el = document.getElementById('activity-log');
+    if (el) el.remove();
+  }
+
+  function addActivityItem(event) {
+    showActivityLog();
+    var log = document.getElementById('activity-log');
+    if (event.type === 'tool_start') {
+      var item = document.createElement('div');
+      item.className = 'activity-item running';
+      item.setAttribute('data-call-id', event.call_id);
+      var argsStr = Object.keys(event.args).length ? ' ' + JSON.stringify(event.args) : '';
+      if (argsStr.length > 80) argsStr = argsStr.substring(0, 77) + '...';
+      item.textContent = '\u25b8 ' + event.name + argsStr;
+      log.appendChild(item);
+    } else if (event.type === 'tool_end') {
+      var items = log.querySelectorAll('[data-call-id="' + event.call_id + '"]');
+      if (items.length) {
+        var el = items[0];
+        el.className = 'activity-item ' + (event.ok ? 'done' : 'error');
+        el.textContent = (event.ok ? '\u2713 ' : '\u2717 ') + event.name + ' ' + event.elapsed_ms + 'ms';
+      }
+    }
+    log.scrollTop = log.scrollHeight;
+    scrollToEnd();
+  }
+
+  function startEventStream() {
+    stopEventStream();
+    eventSource = new EventSource('/api/agents/' + encodeURIComponent(agentId) + '/events');
+    eventSource.onmessage = function(e) {
+      var ev;
+      try { ev = JSON.parse(e.data); } catch(err) { return; }
+      if (ev.type === 'tool_start' || ev.type === 'tool_end') {
+        addActivityItem(ev);
+      }
+    };
+  }
+
+  function stopEventStream() {
+    if (eventSource) {
+      eventSource.close();
+      eventSource = null;
+    }
+  }
+
   async function sendMessage() {
     var content = inputEl.value.trim();
     if (!content || isLoading) return;
@@ -1045,6 +1396,7 @@ function toggleTokenVis() {
     setStatus('');
     addMessage({role:'user', content:content, timestamp:Math.floor(Date.now()/1000)});
     showTyping();
+    startEventStream();
     try {
       var resp = await fetch('/api/agents/' + encodeURIComponent(agentId) + '/chat', {
         method: 'POST',
@@ -1056,14 +1408,17 @@ function toggleTokenVis() {
         throw new Error(errData.error || 'Request failed');
       }
       var data = await resp.json();
+      stopEventStream();
       hideTyping();
+      hideActivityLog();
       if (data.messages) {
-        messagesEl.querySelectorAll('.chat-bubble').forEach(function(el){ el.remove(); });
+        messagesEl.querySelectorAll('.chat-bubble, .activity-log').forEach(function(el){ el.remove(); });
         lastTimestamp = 0;
         data.messages.forEach(function(m){ addMessage(m); });
       }
       setLoading(false);
     } catch(err) {
+      stopEventStream();
       hideTyping();
       setLoading(false);
       setStatus(err.message || 'failed to send message', true);
