@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 from datetime import datetime
 from typing import Any, Callable
@@ -7,14 +8,46 @@ from agno.agent import Agent
 from agno.models.message import Message
 from agno.run.agent import RunOutput
 
+from . import agent_config
 from . import compact
 from . import storage
-from .config import CONFIG, get_model
+from .config import get_model
 from .logging import logger
 from .messages import OutboundMessage
 from .prompts import SYSTEM_PROMPT
 from .runtime import get_runtime_manager
 from .tools import TOOLS
+
+# ── Event broadcasting (stream events to UI) ──
+
+_event_subscribers: dict[str, set[asyncio.Queue]] = {}
+
+
+def subscribe_events(agent_id: str) -> asyncio.Queue:
+    if agent_id not in _event_subscribers:
+        _event_subscribers[agent_id] = set()
+    q: asyncio.Queue = asyncio.Queue(maxsize=256)
+    _event_subscribers[agent_id].add(q)
+    return q
+
+
+def unsubscribe_events(agent_id: str, q: asyncio.Queue) -> None:
+    subs = _event_subscribers.get(agent_id)
+    if subs:
+        subs.discard(q)
+        if not subs:
+            del _event_subscribers[agent_id]
+
+
+def _publish_event(agent_id: str, event: dict[str, object]) -> None:
+    subs = _event_subscribers.get(agent_id)
+    if not subs:
+        return
+    for q in subs:
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            pass
 
 
 async def _tool_hook(function_name: str, function_call: Callable, arguments: dict[str, Any]) -> Any:
@@ -35,45 +68,62 @@ async def _tool_hook(function_name: str, function_call: Callable, arguments: dic
 
 class Mico:
     def __init__(self):
-        self._agent_cache: dict[str, tuple[str, str, Agent]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self.bus: Any = None  # set by web.py after bus creation
 
-    def _build_system_message(self) -> str:
-        return SYSTEM_PROMPT.format(date=datetime.now().strftime('%A, %B %d, %Y'))
+    async def _build_system_message(self, agent_id: str) -> str:
+        prompt = SYSTEM_PROMPT.format(date=datetime.now().strftime('%A, %B %d, %Y'))
+        runtime = get_runtime_manager()
+        roots = await runtime.list_root_names(agent_id)
+        prompt += '\n\n## Available File Roots\n\n'
+        prompt += 'Use the `root` argument with workspace file tools.\n'
+        prompt += 'Current roots for this agent: ' + ', '.join(roots) + '.'
+        for filename in ('SOUL.md', 'MEMORY.md'):
+            try:
+                content = await runtime.read_file(agent_id=agent_id, path=filename)
+                if content and content.strip():
+                    prompt += f'\n\n---\n\n# {filename}\n\n{content.strip()}'
+            except Exception:
+                pass
+        return prompt
 
     async def _build_history_input(self, *, agent_id: str, token_budget: int = 20_000) -> list[Message]:
         rows = await compact.select_recent_messages_for_context(agent_id=agent_id, token_budget=token_budget)
         history: list[Message] = []
         for row in rows:
             role = str(row.role)
-            content = row.content
             if role not in {'user', 'assistant', 'system', 'tool'}:
                 continue
-            if content is None:
+            has_content = bool(row.content and row.content.strip())
+            has_tool_calls = bool(row.tool_calls)
+            if not has_content and not has_tool_calls:
                 continue
-            text = str(content)
-            if not text.strip():
-                continue
-            history.append(Message(role=role, content=text))
+            kwargs: dict[str, Any] = {'role': role}
+            if has_content:
+                kwargs['content'] = row.content.strip()
+            if row.tool_call_id:
+                kwargs['tool_call_id'] = row.tool_call_id
+            if row.tool_calls:
+                kwargs['tool_calls'] = row.tool_calls
+            tool_name = str(row.metadata.get('tool_name') or '').strip()
+            if role == 'tool' and tool_name:
+                kwargs['tool_name'] = tool_name
+            if row.metadata.get('tool_call_error'):
+                kwargs['tool_call_error'] = True
+            history.append(Message(**kwargs))
         return history
 
-    async def _get_agent(self, *, agent_row: storage.AgentRecord) -> Agent:
-        system_message = self._build_system_message()
-        model_name = CONFIG.model.openrouter_model
-        cached = self._agent_cache.get(agent_row.id)
-        if cached and cached[0] == system_message and cached[1] == model_name:
-            return cached[2]
-
-        logger.info(f'[agent:{agent_row.id[:8]}] building agent | model={model_name}')
-        agent = Agent(
-            model=await get_model(),
+    async def _get_agent(self, *, agent_id: str) -> Agent:
+        system_message = await self._build_system_message(agent_id)
+        llm = await agent_config.get_agent_llm_config(agent_id)
+        model_name = f'{llm.provider}:{llm.model}'
+        logger.info(f'[agent:{agent_id[:8]}] building agent | model={model_name}')
+        return Agent(
+            model=await get_model(llm),
             system_message=system_message,
             tools=TOOLS,
             tool_hooks=[_tool_hook],
         )
-        self._agent_cache[agent_row.id] = (system_message, model_name, agent)
-        return agent
 
     def _lock_for_agent(self, agent_id: str) -> asyncio.Lock:
         lock = self._locks.get(agent_id)
@@ -132,6 +182,8 @@ class Mico:
         if agent_row is None:
             raise ValueError(f"Agent '{agent_id}' not found.")
 
+        _publish_event(agent_id, {'type': 'run_start'})
+
         t_compact = time.perf_counter()
         await compact.compact_conversation_if_needed(agent_id=agent_id)
         logger.debug(f'[{tag}] compact check done in {(time.perf_counter() - t_compact) * 1000:.0f}ms')
@@ -149,11 +201,8 @@ class Mico:
             history_input.append(Message(role='user', content=user_input.strip()))
 
         t_agent = time.perf_counter()
-        agent = await self._get_agent(agent_row=agent_row)
-        cached = agent_row.id in self._agent_cache
-        logger.debug(
-            f'[{tag}] agent {"from cache" if cached else "rebuilt"} in {(time.perf_counter() - t_agent) * 1000:.0f}ms'
-        )
+        agent = await self._get_agent(agent_id=agent_id)
+        logger.debug(f'[{tag}] agent built in {(time.perf_counter() - t_agent) * 1000:.0f}ms')
 
         pending_outbound: list[OutboundMessage] = []
 
@@ -162,7 +211,8 @@ class Mico:
         t_stream_start = time.perf_counter()
         t_first_token: float | None = None
 
-        model_id = CONFIG.model.openrouter_model
+        llm = await agent_config.get_agent_llm_config(agent_id)
+        model_id = f'{llm.provider}:{llm.model}'
         logger.debug(f'[{tag}] starting LLM stream | model={model_id} context_messages={context_msgs + (1 if user_input else 0)}')
 
         agent_stream = agent.arun(
@@ -190,6 +240,37 @@ class Mico:
                     chunks.append(str(piece))
                 continue
 
+            if event in ('ToolCallStarted', 'ToolCallCompleted', 'ToolCallError'):
+                tool = getattr(chunk, 'tool', None)
+                if tool:
+                    tool_args = {k: repr(v)[:100] for k, v in (tool.tool_args or {}).items()}
+                    if event == 'ToolCallStarted':
+                        _publish_event(agent_id, {
+                            'type': 'tool_start',
+                            'call_id': tool.tool_call_id or '',
+                            'name': tool.tool_name or '',
+                            'args': tool_args,
+                        })
+                    elif event == 'ToolCallCompleted':
+                        elapsed = round(tool.metrics.duration * 1000) if tool.metrics and tool.metrics.duration else 0
+                        _publish_event(agent_id, {
+                            'type': 'tool_end',
+                            'call_id': tool.tool_call_id or '',
+                            'name': tool.tool_name or '',
+                            'elapsed_ms': elapsed,
+                            'ok': True,
+                        })
+                    else:  # ToolCallError
+                        elapsed = round(tool.metrics.duration * 1000) if tool.metrics and tool.metrics.duration else 0
+                        _publish_event(agent_id, {
+                            'type': 'tool_end',
+                            'call_id': tool.tool_call_id or '',
+                            'name': tool.tool_name or '',
+                            'elapsed_ms': elapsed,
+                            'ok': False,
+                        })
+                continue
+
             if isinstance(chunk, RunOutput):
                 run_output = chunk
 
@@ -208,13 +289,56 @@ class Mico:
             **({k: v for k, v in {'channel': channel, 'chat_id': chat_id, 'sender_id': sender_id}.items() if v}),
         }
 
-        async def _save(role: str, text: str | None) -> None:
-            if text and text.strip():
-                await storage.add_message(agent_id=agent_id, role=role, content=text.strip(), timestamp=ts_now, metadata=event_metadata)
+        async def _save(
+            role: str,
+            *,
+            content: str | None = None,
+            tool_call_id: str | None = None,
+            tool_calls: list[dict[str, Any]] | None = None,
+            metadata: dict[str, Any] | None = None,
+        ) -> None:
+            clean_content = content.strip() if content and content.strip() else None
+            if clean_content is None and not tool_calls:
+                return
+            message_metadata = {**event_metadata, **(metadata or {})}
+            await storage.add_message(
+                agent_id=agent_id,
+                role=role,
+                content=clean_content,
+                timestamp=ts_now,
+                tool_call_id=tool_call_id.strip() if tool_call_id and tool_call_id.strip() else None,
+                tool_calls=tool_calls or None,
+                metadata=message_metadata,
+            )
 
-        await _save('system', system_input)
-        await _save('user', user_input)
-        await _save('assistant', content if content.strip() else None)
+        await _save('system', content=system_input)
+        await _save('user', content=user_input)
+
+        # Save tool calls and results from the run
+        if run_output and run_output.messages:
+            for msg in run_output.messages:
+                if msg.role == 'assistant' and msg.tool_calls:
+                    assistant_content = msg.get_content_string() if msg.content else None
+                    await _save(
+                        'assistant',
+                        content=assistant_content,
+                        tool_calls=json.loads(json.dumps(msg.tool_calls, default=str)),
+                    )
+                elif msg.role == 'tool':
+                    tool_content = msg.get_content_string() if msg.content else None
+                    tool_meta: dict[str, Any] = {}
+                    if msg.tool_name:
+                        tool_meta['tool_name'] = msg.tool_name
+                    if msg.tool_call_error:
+                        tool_meta['tool_call_error'] = True
+                    await _save(
+                        'tool',
+                        content=tool_content,
+                        tool_call_id=msg.tool_call_id,
+                        metadata=tool_meta,
+                    )
+
+        await _save('assistant', content=content if content.strip() else None)
         logger.debug(f'[{tag}] messages saved in {(time.perf_counter() - t_save) * 1000:.0f}ms')
 
         if self.bus and pending_outbound:
@@ -230,4 +354,5 @@ class Mico:
             f' ttft={ttft_ms}'
             f' response_len={len(content)}'
         )
+        _publish_event(agent_id, {'type': 'run_end'})
         return content
